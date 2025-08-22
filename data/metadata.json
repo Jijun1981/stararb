@@ -1,0 +1,114 @@
+{
+  "AG0": {
+    "fetch_time": "2025-08-21T08:30:40.521422",
+    "start_date": "2012-05-10",
+    "end_date": "2025-08-19",
+    "total_records": 3233,
+    "file_path": "data/AG0.parquet",
+    "file_size_kb": 126.3583984375
+  },
+  "AL0": {
+    "fetch_time": "2025-08-21T08:30:40.530045",
+    "start_date": "2005-01-04",
+    "end_date": "2025-08-19",
+    "total_records": 5019,
+    "file_path": "data/AL0.parquet",
+    "file_size_kb": 168.2548828125
+  },
+  "AU0": {
+    "fetch_time": "2025-08-21T08:30:40.536648",
+    "start_date": "2008-01-09",
+    "end_date": "2025-08-19",
+    "total_records": 4292,
+    "file_path": "data/AU0.parquet",
+    "file_size_kb": 175.38671875
+  },
+  "CU0": {
+    "fetch_time": "2025-08-21T08:30:40.544238",
+    "start_date": "2005-01-04",
+    "end_date": "2025-08-19",
+    "total_records": 5019,
+    "file_path": "data/CU0.parquet",
+    "file_size_kb": 193.9560546875
+  },
+  "HC0": {
+    "fetch_time": "2025-08-21T08:30:40.550998",
+    "start_date": "2014-03-21",
+    "end_date": "2025-08-19",
+    "total_records": 2781,
+    "file_path": "data/HC0.parquet",
+    "file_size_kb": 103.447265625
+  },
+  "I0": {
+    "fetch_time": "2025-08-21T08:30:40.557089",
+    "start_date": "2013-10-18",
+    "end_date": "2025-08-19",
+    "total_records": 2880,
+    "file_path": "data/I0.parquet",
+    "file_size_kb": 99.63671875
+  },
+  "NI0": {
+    "fetch_time": "2025-08-21T08:30:40.562701",
+    "start_date": "2015-03-27",
+    "end_date": "2025-08-19",
+    "total_records": 2531,
+    "file_path": "data/NI0.parquet",
+    "file_size_kb": 113.712890625
+  },
+  "PB0": {
+    "fetch_time": "2025-08-21T08:30:40.570471",
+    "start_date": "2011-03-24",
+    "end_date": "2025-08-19",
+    "total_records": 3502,
+    "file_path": "data/PB0.parquet",
+    "file_size_kb": 113.8134765625
+  },
+  "RB0": {
+    "fetch_time": "2025-08-21T08:30:40.577563",
+    "start_date": "2009-03-27",
+    "end_date": "2025-08-19",
+    "total_records": 3983,
+    "file_path": "data/RB0.parquet",
+    "file_size_kb": 145.771484375
+  },
+  "SF0": {
+    "fetch_time": "2025-08-21T08:30:40.583894",
+    "start_date": "2014-08-12",
+    "end_date": "2025-08-19",
+    "total_records": 2650,
+    "file_path": "data/SF0.parquet",
+    "file_size_kb": 94.978515625
+  },
+  "SM0": {
+    "fetch_time": "2025-08-21T08:30:40.589657",
+    "start_date": "2014-08-12",
+    "end_date": "2025-08-19",
+    "total_records": 2633,
+    "file_path": "data/SM0.parquet",
+    "file_size_kb": 92.94921875
+  },
+  "SN0": {
+    "fetch_time": "2025-08-21T08:30:40.595281",
+    "start_date": "2015-03-27",
+    "end_date": "2025-08-19",
+    "total_records": 2531,
+    "file_path": "data/SN0.parquet",
+    "file_size_kb": 109.3037109375
+  },
+  "SS0": {
+    "fetch_time": "2025-08-21T08:30:40.601689",
+    "start_date": "2019-09-25",
+    "end_date": "2025-08-19",
+    "total_records": 1430,
+    "file_path": "data/SS0.parquet",
+    "file_size_kb": 55.173828125
+  },
+  "ZN0": {
+    "fetch_time": "2025-08-21T08:30:40.608374",
+    "start_date": "2007-03-26",
+    "end_date": "2025-08-19",
+    "total_records": 4482,
+    "file_path": "data/ZN0.parquet",
+    "file_size_kb": 166.5009765625
+  }
+}

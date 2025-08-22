@@ -1,0 +1,156 @@
+[
+  {
+    "pair": "AG0-AL0",
+    "num_trades": 3,
+    "position_ratio": 0.41935483870967744,
+    "initial_beta": 0.4217488760336543,
+    "trades_count": 3
+  },
+  {
+    "pair": "AG0-PB0",
+    "num_trades": 3,
+    "position_ratio": 0.3978494623655914,
+    "initial_beta": 1.0110360866173027,
+    "trades_count": 3
+  },
+  {
+    "pair": "AG0-ZN0",
+    "num_trades": 4,
+    "position_ratio": 0.2724014336917563,
+    "initial_beta": -2.0970690348900067,
+    "trades_count": 4
+  },
+  {
+    "pair": "AG0-RB0",
+    "num_trades": 2,
+    "position_ratio": 0.21505376344086022,
+    "initial_beta": -0.32110249461239,
+    "trades_count": 2
+  },
+  {
+    "pair": "AG0-SF0",
+    "num_trades": 3,
+    "position_ratio": 0.26523297491039427,
+    "initial_beta": -1.1135384859065587,
+    "trades_count": 3
+  },
+  {
+    "pair": "AG0-SM0",
+    "num_trades": 3,
+    "position_ratio": 0.18996415770609318,
+    "initial_beta": -0.7940633188909899,
+    "trades_count": 3
+  },
+  {
+    "pair": "AG0-SS0",
+    "num_trades": 4,
+    "position_ratio": 0.24014336917562723,
+    "initial_beta": -1.9185783995404808,
+    "trades_count": 4
+  },
+  {
+    "pair": "AU0-I0",
+    "num_trades": 3,
+    "position_ratio": 0.3118279569892473,
+    "initial_beta": 0.6575738327674663,
+    "trades_count": 3
+  },
+  {
+    "pair": "AL0-CU0",
+    "num_trades": 3,
+    "position_ratio": 0.3655913978494624,
+    "initial_beta": 1.3837598837973062,
+    "trades_count": 3
+  },
+  {
+    "pair": "AL0-PB0",
+    "num_trades": 5,
+    "position_ratio": 0.14336917562724014,
+    "initial_beta": 0.7893345757989825,
+    "trades_count": 5
+  },
+  {
+    "pair": "CU0-SN0",
+    "num_trades": 4,
+    "position_ratio": 0.2724014336917563,
+    "initial_beta": 2.6818749426984714,
+    "trades_count": 4
+  },
+  {
+    "pair": "CU0-ZN0",
+    "num_trades": 8,
+    "position_ratio": 0.11469534050179211,
+    "initial_beta": 0.3759333666034658,
+    "trades_count": 8
+  },
+  {
+    "pair": "PB0-SS0",
+    "num_trades": 2,
+    "position_ratio": 0.2222222222222222,
+    "initial_beta": -0.43539725866069195,
+    "trades_count": 2
+  },
+  {
+    "pair": "ZN0-SF0",
+    "num_trades": 9,
+    "position_ratio": 0.16845878136200718,
+    "initial_beta": 0.33389680748556894,
+    "trades_count": 9
+  },
+  {
+    "pair": "HC0-SM0",
+    "num_trades": 2,
+    "position_ratio": 0.17204301075268819,
+    "initial_beta": 1.0502140938433873,
+    "trades_count": 2
+  },
+  {
+    "pair": "HC0-SS0",
+    "num_trades": 4,
+    "position_ratio": 0.33691756272401435,
+    "initial_beta": 1.6792307427469535,
+    "trades_count": 4
+  },
+  {
+    "pair": "RB0-SF0",
+    "num_trades": 5,
+    "position_ratio": 0.13261648745519714,
+    "initial_beta": 1.4846093256345692,
+    "trades_count": 5
+  },
+  {
+    "pair": "RB0-SM0",
+    "num_trades": 2,
+    "position_ratio": 0.1863799283154122,
+    "initial_beta": 1.1121167177347404,
+    "trades_count": 2
+  },
+  {
+    "pair": "RB0-SS0",
+    "num_trades": 3,
+    "position_ratio": 0.2903225806451613,
+    "initial_beta": 1.7140863180279495,
+    "trades_count": 3
+  },
+  {
+    "pair": "SF0-SM0",
+    "num_trades": 6,
+    "position_ratio": 0.32616487455197135,
+    "initial_beta": 0.6999127552053085,
+    "trades_count": 6
+  },
+  {
+    "pair": "SF0-SS0",
+    "num_trades": 6,
+    "position_ratio": 0.4874551971326165,
+    "initial_beta": 1.4586437209315664,
+    "trades_count": 6
+  },
+  {
+    "pair": "SM0-SS0",
+    "num_trades": 5,
+    "position_ratio": 0.3906810035842294,
+    "initial_beta": 2.168552046395384,
+    "trades_count": 5
+  }
+]
