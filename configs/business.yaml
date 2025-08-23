@@ -1,0 +1,269 @@
+# 期货配对交易系统 - 业务配置文件
+# 业务参数和算法配置
+
+# ========== 品种配置 ==========
+symbols:
+  # 14个金属期货品种(0指数连续合约)
+  all: ["AG0", "AU0", "AL0", "CU0", "HC0", "I0", "NI0", "PB0", "RB0", "SF0", "SM0", "SN0", "SS0", "ZN0"]
+  
+  # 品种分类
+  precious: ["AG0", "AU0"]  # 贵金属
+  nonferrous: ["AL0", "CU0", "NI0", "PB0", "SN0", "ZN0"]  # 有色金属  
+  ferrous: ["HC0", "I0", "RB0", "SF0", "SM0", "SS0"]  # 黑色系
+
+  # 品种名称映射
+  names:
+    AG0: "白银"
+    AU0: "黄金"
+    AL0: "铝"
+    CU0: "铜"
+    HC0: "热卷"
+    I0: "铁矿石"
+    NI0: "镍"
+    PB0: "铅"
+    RB0: "螺纹钢"
+    SF0: "硅铁"
+    SM0: "锰硅"
+    SN0: "锡"
+    SS0: "不锈钢"
+    ZN0: "锌"
+
+# ========== 时间参数 ==========
+periods:
+  # 数据获取范围
+  data_start: "2020-01-01"  # 分析数据起始日期
+  data_end: null            # null表示到最新日期
+  
+  # Beta估计分段
+  train_start: "2020-01-01"
+  train_end: "2023-12-31"
+  valid_start: "2024-01-01"
+  valid_end: "2025-08-20"
+  
+  # 协整检验时间窗口
+  cointegration_windows:
+    - "5y"  # 5年 (1260个交易日)
+    - "4y"  # 4年 (1008个交易日)
+    - "3y"  # 3年 (756个交易日)
+    - "2y"  # 2年 (504个交易日)
+    - "1y"  # 1年 (252个交易日)
+  
+  # 波动率计算期间(用于方向判定)
+  volatility_start: "2024-01-01"
+
+# ========== 协整检验参数 ==========
+cointegration:
+  # 检验方法
+  method: "engle_granger"  # Engle-Granger两步法
+  
+  # 阈值设置
+  p_threshold: 0.05        # p值阈值(主要依据5年p值)
+  
+  # 主要判定依据
+  primary_window: "5y"     # 主要依据5年窗口结果
+  
+  # ADF检验设置
+  adf_autolag: "AIC"
+  adf_maxlag_formula: "T**(1/3)"  # int(T**(1/3))
+
+# ========== Beta估计参数 ==========
+beta_estimation:
+  # 5种候选方法
+  methods:
+    - "ols_2y"     # OLS(2年末尾数据)
+    - "ewls"       # 指数加权最小二乘
+    - "fm_ols"     # FM-OLS (Phillips-Hansen)
+    - "min_hl"     # 最小半衰期网格搜索
+    - "huber"      # Huber稳健回归
+  
+  # EWLS参数
+  ewls_halflife: [63, 126, 252]  # 可选半衰期
+  
+  # Min-HL参数
+  min_hl_grid_points: 201
+  min_hl_search_range: [0.5, 1.5]  # [0.5*β_OLS, 1.5*β_OLS]
+  
+  # Huber参数
+  huber_delta: 1.35
+  
+  # 样本外验证硬门槛 (最终优化后参数 - 20250820)
+  validation_gates:
+    adf_pvalue_max: 0.15      # ADF p值 < 0.15 (放宽到0.15)
+    halflife_min: 2           # 半衰期 >= 2 交易日
+    halflife_max: 60          # 半衰期 <= 60 交易日 (从45天放宽)
+    beta_cv_max: 0.40         # 稳健CV <= 0.40 (从0.30放宽)
+    pwf_enabled: false        # PWF验证禁用，使用单折验证
+  
+  # 两步选择参数
+  ir_similarity_threshold: 0.10  # IR差异<10%时使用加权平均
+
+# ========== 信号生成参数 ==========
+signal_generation:
+  # Kalman滤波参数
+  kalman:
+    # 初始P矩阵(误差协方差)
+    initial_P: [[1e-4, 0], [0, 1e-4]]
+  
+  # Z-score计算
+  zscore:
+    # 双Z-score模式
+    modes: ["innovation", "rolling", "both"]
+    default_mode: "both"
+    
+    # 创新z-score (主信号)
+    innovation:
+      open_threshold: 2.0     # |z| > 2.0 开仓
+      close_threshold: 0.5    # |z| < 0.5 平仓
+    
+    # 滚动z-score (验证闸门)
+    rolling:
+      window: 60              # 60个交易日滚动窗口
+      gate_threshold: 1.5     # 闸门阈值
+  
+  # 理论配比计算
+  ratio:
+    max_denominator: 100      # 连分数逼近最大分母
+  
+  # 信号管理
+  management:
+    max_holding_days: 30      # 最大持仓30天
+    prevent_duplicate: true   # 防止重复开仓
+
+# ========== 回测参数 ==========
+backtest:
+  # 资金设置
+  capital:
+    initial: 5000000          # 500万初始资金
+    currency: "CNY"
+  
+  # 交易成本
+  costs:
+    margin_rate: 0.12         # 12% 保证金率
+    commission_rate: 0.0002   # 万分之2 手续费(单边)
+    slippage_ticks: 3         # 每腿3个tick滑点
+  
+  # 仓位管理
+  position:
+    # 仓位权重(每个配对的资金分配比例)
+    default_weight: 0.05      # 默认5%
+    max_pairs: 20             # 最大同时持有配对数
+  
+  # 风险控制
+  risk:
+    stop_loss_ratio: 0.10     # 保证金10%止损
+    margin_call_threshold: 0  # 可用资金<0触发强平
+    max_holding_days: 30      # 30天时间止损
+  
+  # 绩效计算
+  performance:
+    benchmark: null           # 基准收益率(暂不设置)
+    risk_free_rate: 0.03     # 3% 无风险利率(年化)
+    trading_days_per_year: 252
+
+# ========== 合约规格 ==========
+contract_specs:
+  AG0:
+    multiplier: 15            # 15 kg/手
+    tick_size: 1              # 1元/kg 最小变动价位
+    currency: "CNY"
+  
+  AU0:
+    multiplier: 1000          # 1000 g/手  
+    tick_size: 0.02           # 0.02元/g
+    currency: "CNY"
+  
+  AL0:
+    multiplier: 5000          # 5 吨/手
+    tick_size: 5              # 5元/吨
+    currency: "CNY"
+  
+  CU0:
+    multiplier: 5000          # 5 吨/手
+    tick_size: 10             # 10元/吨
+    currency: "CNY"
+  
+  HC0:
+    multiplier: 10000         # 10 吨/手
+    tick_size: 1              # 1元/吨
+    currency: "CNY"
+  
+  I0:
+    multiplier: 100000        # 100 吨/手
+    tick_size: 0.5            # 0.5元/吨
+    currency: "CNY"
+  
+  NI0:
+    multiplier: 1000          # 1 吨/手
+    tick_size: 10             # 10元/吨
+    currency: "CNY"
+  
+  PB0:
+    multiplier: 5000          # 5 吨/手
+    tick_size: 5              # 5元/吨
+    currency: "CNY"
+  
+  RB0:
+    multiplier: 10000         # 10 吨/手
+    tick_size: 1              # 1元/吨
+    currency: "CNY"
+  
+  SF0:
+    multiplier: 5000          # 5 吨/手
+    tick_size: 2              # 2元/吨
+    currency: "CNY"
+  
+  SM0:
+    multiplier: 5000          # 5 吨/手
+    tick_size: 2              # 2元/吨
+    currency: "CNY"
+  
+  SN0:
+    multiplier: 1000          # 1 吨/手
+    tick_size: 10             # 10元/吨
+    currency: "CNY"
+  
+  SS0:
+    multiplier: 5000          # 5 吨/手
+    tick_size: 5              # 5元/吨
+    currency: "CNY"
+  
+  ZN0:
+    multiplier: 5000          # 5 吨/手
+    tick_size: 5              # 5元/吨
+    currency: "CNY"
+
+# ========== 数据质量参数 ==========
+data_quality:
+  # 缺失值处理
+  fill_method: "ffill"        # 前向填充
+  
+  # 异常值检测
+  outlier_threshold: 5.0      # 5倍标准差
+  
+  # 数据验证
+  min_data_points: 100        # 最少数据点数
+  
+# ========== 输出设置 ==========
+output:
+  # 文件格式
+  formats:
+    data: "parquet"           # 数据文件格式
+    results: "csv"            # 结果文件格式
+    reports: "html"           # 报告格式
+  
+  # 精度设置
+  precision:
+    beta: 6                   # β系数精度(小数位)
+    pvalue: 6                 # p值精度
+    pnl: 2                    # PnL精度(分)
+  
+  # 压缩设置
+  compression:
+    parquet: "snappy"         # Parquet压缩方式
+    csv: null                 # CSV不压缩
+
+# ========== 日志配置 ==========
+logging:
+  level: "INFO"               # 日志级别
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/system.log"     # 日志文件路径

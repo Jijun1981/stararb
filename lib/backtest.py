@@ -29,34 +29,28 @@ logger = logging.getLogger(__name__)
 @dataclass 
 class Position:
     """持仓记录"""
+    # 必需字段（无默认值）
     pair: str
     direction: str  # 'long_spread' or 'short_spread'
     spread_formula: str
     open_date: datetime
     position_weight: float
-    
-    # 合约信息
     symbol_y: str
     symbol_x: str
     contracts_y: int  # Y合约手数
     contracts_x: int  # X合约手数
-    
-    # 开仓价格（含滑点）
+    beta: float  # Kalman滤波的beta
     open_price_y: float
     open_price_x: float
-    
-    # 保证金和费用
     margin_occupied: float
     open_commission: float
     
-    # 前日价格（用于逐日盯市）
+    # 可选字段（有默认值）
+    ols_beta: float = np.nan  # 60天滚动OLS的beta
+    open_z_score: float = 0.0  # 开仓时的Z-score
     prev_price_y: float = 0.0
     prev_price_x: float = 0.0
-    
-    # 累计浮盈亏
     unrealized_pnl: float = 0.0
-    
-    # 合约乘数
     multiplier_y: float = 1.0
     multiplier_x: float = 1.0
 
@@ -338,7 +332,14 @@ class BacktestEngine:
         """
         try:
             pair = signal['pair']
-            symbol_x, symbol_y = pair.split('-')  # 按照'X-Y'格式解析
+            
+            # 优先使用信号中提供的symbol_x和symbol_y
+            if 'symbol_x' in signal and 'symbol_y' in signal:
+                symbol_x = signal['symbol_x']
+                symbol_y = signal['symbol_y']
+            else:
+                # 兼容旧代码：按照'X-Y'格式解析
+                symbol_x, symbol_y = pair.split('-')
             
             # 获取基础符号（用于合约规格查询）
             base_symbol_x = symbol_x.replace('_close', '') if '_close' in symbol_x else symbol_x
@@ -649,7 +650,8 @@ class BacktestEngine:
         if signal_type in ['long_spread', 'short_spread'] or signal_type.startswith('open'):
             return self._open_position(signal, current_prices)
         elif signal_type == 'close':
-            return self._close_position(pair, current_prices, 'signal', current_date)
+            close_z_score = signal.get('z_score', np.nan)
+            return self._close_position(pair, current_prices, 'signal', current_date, close_z_score)
         else:
             logger.warning(f"未知信号类型: {signal_type}")
             return False
@@ -690,12 +692,23 @@ class BacktestEngine:
         
         if direction == 'long_spread':
             # 做多价差：买Y卖X
+            
+            # 调试HC0-I0的价格获取
+            if pair == 'HC0-I0':
+                logger.info(f"HC0-I0调试 - lots_info: symbol_x={lots_info['symbol_x']}, symbol_y={lots_info['symbol_y']}")
+                logger.info(f"HC0-I0调试 - current_prices keys: {list(current_prices.keys())}")
+                logger.info(f"HC0-I0调试 - 获取价格: X({lots_info['symbol_x']})={current_prices.get(lots_info['symbol_x'])}, Y({lots_info['symbol_y']})={current_prices.get(lots_info['symbol_y'])}")
+            
             open_price_y = self.apply_slippage(
                 current_prices[lots_info['symbol_y']], 'buy', lots_info['tick_size_y']
             )
             open_price_x = self.apply_slippage(
                 current_prices[lots_info['symbol_x']], 'sell', lots_info['tick_size_x']
             )
+            
+            # 再次调试，确认价格没有被交换
+            if pair == 'HC0-I0':
+                logger.info(f"HC0-I0调试 - 应用滑点后: open_price_x={open_price_x}, open_price_y={open_price_y}")
         else:
             # 做空价差：卖Y买X
             open_price_y = self.apply_slippage(
@@ -714,6 +727,12 @@ class BacktestEngine:
         try:
             logger.debug(f"创建持仓: {pair}, 方向={direction}")
             logger.debug(f"lots_info: {lots_info}")
+            
+            # 调试HC0-I0的Position创建
+            if pair == 'HC0-I0':
+                logger.info(f"HC0-I0调试 - 创建Position: symbol_x={lots_info['symbol_x']}, symbol_y={lots_info['symbol_y']}")
+                logger.info(f"HC0-I0调试 - 创建Position: open_price_x={open_price_x}, open_price_y={open_price_y}")
+            
             position = Position(
                 pair=pair,
                 direction=direction,
@@ -724,6 +743,9 @@ class BacktestEngine:
                 symbol_x=lots_info['symbol_x'],
                 contracts_y=lots_info['contracts_y'],
                 contracts_x=lots_info['contracts_x'],
+                beta=abs(signal.get('theoretical_ratio', signal.get('beta', 1.0))),  # Kalman beta
+                ols_beta=signal.get('ols_beta', np.nan),  # OLS beta
+                open_z_score=signal.get('z_score', 0.0),  # 开仓时的Z-score
                 open_price_y=open_price_y,
                 open_price_x=open_price_x,
                 margin_occupied=lots_info['margin_required'],
@@ -749,7 +771,8 @@ class BacktestEngine:
         return True
         
     def _close_position(self, pair: str, current_prices: Dict[str, float], 
-                       reason: str, current_date: datetime = None) -> bool:
+                       reason: str, current_date: datetime = None, 
+                       close_z_score: float = np.nan) -> bool:
         """平仓操作"""
         position = self.position_manager.remove_position(pair)
         if position is None:
@@ -831,6 +854,10 @@ class BacktestEngine:
                 'trade_id': self.trade_id_counter,
                 'pair': pair,
                 'direction': position.direction,
+                'beta_kalman': position.beta,  # Kalman beta
+                'beta_ols': position.ols_beta,  # OLS beta
+                'open_z_score': position.open_z_score,  # 开仓Z-score
+                'close_z_score': close_z_score,  # 平仓Z-score
                 'spread_formula': position.spread_formula,
                 'open_date': position.open_date.strftime('%Y-%m-%d'),
                 'close_date': close_date.strftime('%Y-%m-%d'),
@@ -1149,8 +1176,10 @@ class BacktestEngine:
             stop_loss_threshold = -position.margin_occupied * self.stop_loss_pct
             
             if unrealized_pnl <= stop_loss_threshold:
+                loss_pct = unrealized_pnl / position.margin_occupied * 100
                 logger.info(f"触发止损 {position.pair}: 当前PnL={unrealized_pnl:+,.0f}, "
-                          f"止损线={stop_loss_threshold:+,.0f}")
+                          f"止损线={stop_loss_threshold:+,.0f}, 实际损失={loss_pct:.2f}%, "
+                          f"开仓Z={position.open_z_score:.3f}, 当前价格Y={current_y:.3f} X={current_x:.3f}")
                 return True
                 
             return False

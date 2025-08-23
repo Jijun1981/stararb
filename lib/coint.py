@@ -116,7 +116,7 @@ def engle_granger_test(x: np.ndarray, y: np.ndarray,
         return {
             'pvalue': pvalue,
             'adf_stat': adf_stat,
-            'beta': beta,
+            'beta': round(beta, 6),  # REQ-2.3.1: β系数精确到6位小数
             'alpha': alpha,
             'residuals': residuals,
             'direction': direction,
@@ -208,23 +208,28 @@ def adf_test(series: np.ndarray) -> Tuple[float, float]:
 
 def calculate_volatility(log_prices: np.ndarray, 
                         dates: pd.DatetimeIndex,
-                        start_date: str = '2024-01-01') -> float:
+                        start_date: Optional[str] = None) -> float:
     """
     计算年化波动率
     
-    实现: REQ-2.2.1至REQ-2.2.3
+    实现: REQ-2.2.1至REQ-2.2.3, REQ-2.2.7
     
     Args:
         log_prices: 对数价格序列
         dates: 对应的日期索引
-        start_date: 波动率计算起始日期
+        start_date: 波动率计算起始日期（默认为最近1年）
         
     Returns:
         年化波动率
     """
     try:
-        # 截取指定日期后的数据
-        start_dt = pd.to_datetime(start_date)
+        # REQ-2.2.7: 默认使用最近1年数据
+        if start_date is None:
+            # 计算最近1年的起始日期
+            latest_date = dates[-1] if len(dates) > 0 else pd.Timestamp.now()
+            start_dt = latest_date - pd.Timedelta(days=365)
+        else:
+            start_dt = pd.to_datetime(start_date)
         mask = dates >= start_dt
         
         if not np.any(mask):
@@ -252,11 +257,11 @@ def calculate_volatility(log_prices: np.ndarray,
 def determine_direction(series_1: np.ndarray, series_2: np.ndarray,
                        dates_1: pd.DatetimeIndex, dates_2: pd.DatetimeIndex,
                        symbol_1: str, symbol_2: str,
-                       start_date: str = '2024-01-01') -> Tuple[str, str, str]:
+                       start_date: Optional[str] = None) -> Tuple[str, str, str]:
     """
     基于波动率确定回归方向
     
-    实现: REQ-2.2.4至REQ-2.2.5
+    实现: REQ-2.2.4至REQ-2.2.5, REQ-2.2.7
     
     Args:
         series_1: 品种1的对数价格
@@ -265,7 +270,7 @@ def determine_direction(series_1: np.ndarray, series_2: np.ndarray,
         dates_2: 品种2的日期  
         symbol_1: 品种1代码
         symbol_2: 品种2代码
-        start_date: 计算波动率的起始日期
+        start_date: 计算波动率的起始日期（默认为最近1年）
         
     Returns:
         (direction, symbol_x, symbol_y)
@@ -348,7 +353,7 @@ def estimate_parameters(x: np.ndarray, y: np.ndarray,
         
         return {
             'window': window,
-            'beta': beta,
+            'beta': round(beta, 6),  # REQ-2.3.1: β系数精确到6位小数
             'alpha': alpha, 
             'halflife': halflife,
             'r_squared': r_squared,
@@ -465,21 +470,32 @@ def residual_statistics(residuals: np.ndarray) -> Dict:
 
 
 def screen_all_pairs(analyzer: 'CointegrationAnalyzer', 
-                    p_threshold: float = 0.05) -> pd.DataFrame:
+                    p_threshold: float = 0.05,
+                    halflife_min: Optional[float] = None,
+                    halflife_max: Optional[float] = None,
+                    use_halflife_filter: bool = False) -> pd.DataFrame:
     """
     批量筛选所有配对
     
-    实现: REQ-2.4.1至REQ-2.4.6
+    实现: REQ-2.4.1至REQ-2.4.8
     
     Args:
         analyzer: 协整分析器实例
-        p_threshold: 5年p值筛选阈值
+        p_threshold: p值筛选阈值
+        halflife_min: 最小半衰期阈值
+        halflife_max: 最大半衰期阈值  
+        use_halflife_filter: 是否启用半衰期筛选
         
     Returns:
         筛选结果DataFrame
     """
     try:
-        return analyzer.screen_all_pairs(p_threshold)
+        return analyzer.screen_all_pairs(
+            p_threshold=p_threshold,
+            halflife_min=halflife_min,
+            halflife_max=halflife_max,
+            use_halflife_filter=use_halflife_filter
+        )
     except Exception as e:
         logger.error(f"批量筛选失败: {str(e)}")
         return pd.DataFrame()
@@ -545,15 +561,33 @@ class CointegrationAnalyzer:
         return adf_test(series)
     
     def calculate_volatility(self, log_prices: np.ndarray, 
-                           start_date: str = '2024-01-01') -> float:
+                           start_date: Optional[str] = None) -> float:
         """波动率计算接口"""
         return calculate_volatility(log_prices, self.data.index, start_date)
     
     def determine_direction(self, symbol_x: str, symbol_y: str, 
-                          use_recent: bool = True) -> Tuple[str, str, str]:
-        """方向判定接口"""
-        start_date = '2024-01-01' if use_recent else '2020-01-01'
+                          use_recent: bool = True,
+                          recent_start: Optional[str] = None) -> Tuple[str, str, str]:
+        """
+        方向判定接口
         
+        Args:
+            symbol_x: 品种1代码
+            symbol_y: 品种2代码
+            use_recent: 是否使用最近数据计算波动率
+            recent_start: 波动率计算起始日期（默认为最近1年）
+            
+        Returns:
+            (direction, symbol_x_low_vol, symbol_y_high_vol)
+        """
+        # 如果use_recent为True但没有提供recent_start，使用默认值None（会自动计算最近1年）
+        if use_recent and recent_start is None:
+            start_date = None  # 将使用calculate_volatility的默认行为（最近1年）
+        elif use_recent:
+            start_date = recent_start  # 使用用户提供的起始日期
+        else:
+            start_date = None  # 使用全部数据
+            
         return determine_direction(
             self.data[symbol_x].values,
             self.data[symbol_y].values,
@@ -573,17 +607,26 @@ class CointegrationAnalyzer:
         """残差统计接口"""
         return residual_statistics(residuals)
     
-    def screen_all_pairs(self, p_threshold: float = 0.05) -> pd.DataFrame:
+    def screen_all_pairs(self, 
+                        p_threshold: float = 0.05,
+                        halflife_min: Optional[float] = None,
+                        halflife_max: Optional[float] = None,
+                        use_halflife_filter: bool = False,
+                        volatility_start_date: Optional[str] = None) -> pd.DataFrame:
         """
         批量筛选所有可能的配对
         
-        实现: REQ-2.4.1至REQ-2.4.6
+        实现: REQ-2.4.1至REQ-2.4.8
         
         Args:
-            p_threshold: 5年p值筛选阈值
+            p_threshold: p值筛选阈值（默认0.05）
+            halflife_min: 最小半衰期阈值（可选）
+            halflife_max: 最大半衰期阈值（可选）
+            use_halflife_filter: 是否启用半衰期筛选（默认False）
+            volatility_start_date: 波动率计算起始日期（默认为最近1年）
             
         Returns:
-            配对结果DataFrame，按5年p值升序排序
+            配对结果DataFrame，按1年p值升序排序
         """
         logger.info(f"开始批量分析{self.n_symbols}个品种的所有配对...")
         
@@ -604,9 +647,9 @@ class CointegrationAnalyzer:
                 x_data = self.data[symbol1].values
                 y_data = self.data[symbol2].values
                 
-                # 方向判定 (基于2024年数据波动率)
+                # 方向判定 (基于最近数据波动率)
                 direction, symbol_x, symbol_y = self.determine_direction(
-                    symbol1, symbol2, use_recent=True
+                    symbol1, symbol2, use_recent=True, recent_start=volatility_start_date
                 )
                 
                 # 确定最终的X和Y序列
@@ -633,30 +676,35 @@ class CointegrationAnalyzer:
                 for window in windows:
                     if multi_results[window] is not None:
                         pair_result[f'pvalue_{window}'] = multi_results[window]['pvalue']
-                        pair_result[f'beta_{window}'] = multi_results[window]['beta']
+                        # REQ-2.3.1: β系数精确到6位小数
+                        pair_result[f'beta_{window}'] = round(multi_results[window]['beta'], 6)
                         
-                        # 计算半衰期
-                        if window in ['5y', '1y']:  # 只计算关键窗口的半衰期
-                            halflife = calculate_halflife(multi_results[window]['residuals'])
-                            pair_result[f'halflife_{window}'] = halflife
+                        # REQ-2.3.2: 计算所有窗口的半衰期（API要求）
+                        halflife = calculate_halflife(multi_results[window]['residuals'])
+                        pair_result[f'halflife_{window}'] = halflife
                     else:
                         pair_result[f'pvalue_{window}'] = np.nan
                         pair_result[f'beta_{window}'] = np.nan
-                        if window in ['5y', '1y']:
-                            pair_result[f'halflife_{window}'] = np.nan
+                        pair_result[f'halflife_{window}'] = np.nan
                 
                 # 计算波动率信息  
                 vol_x = self.calculate_volatility(
-                    self.data[symbol_x].values, start_date='2024-01-01'
+                    self.data[symbol_x].values, start_date=volatility_start_date
                 )
                 vol_y = self.calculate_volatility(
-                    self.data[symbol_y].values, start_date='2024-01-01' 
+                    self.data[symbol_y].values, start_date=volatility_start_date
                 )
                 
+                # 记录波动率计算的时间段
+                if volatility_start_date:
+                    vol_period = f'{volatility_start_date} to latest'
+                else:
+                    vol_period = 'recent 1 year'
+                    
                 pair_result.update({
                     'volatility_x': vol_x,
                     'volatility_y': vol_y,
-                    'volatility_period': '2024-01-01 to latest'
+                    'volatility_period': vol_period
                 })
                 
                 # 添加5年窗口的详细统计 (如果存在)
@@ -680,25 +728,56 @@ class CointegrationAnalyzer:
             logger.warning("没有成功分析的配对")
             return results_df
         
-        # REQ-2.4.3: 按5年p值筛选
-        if 'pvalue_5y' in results_df.columns:
-            significant_mask = results_df['pvalue_5y'] < p_threshold
-            filtered_df = results_df[significant_mask].copy()
+        # REQ-2.4.3: 筛选条件：5年p值 < 阈值 且 1年p值 < 阈值
+        if 'pvalue_5y' in results_df.columns and 'pvalue_1y' in results_df.columns:
+            # p值筛选
+            significant_mask = (results_df['pvalue_5y'] < p_threshold) & \
+                             (results_df['pvalue_1y'] < p_threshold)
             
-            logger.info(f"筛选结果: {len(filtered_df)}/{len(results_df)} 个配对通过阈值 {p_threshold}")
+            # REQ-2.4.7-2.4.8: 可选的半衰期筛选
+            if use_halflife_filter and ('halflife_5y' in results_df.columns):
+                logger.info(f"启用半衰期筛选: [{halflife_min}, {halflife_max}]")
+                halflife_mask = pd.Series([True] * len(results_df))
+                
+                if halflife_min is not None:
+                    halflife_mask &= (results_df['halflife_5y'] >= halflife_min)
+                    halflife_mask &= results_df['halflife_5y'].notna()
+                
+                if halflife_max is not None:
+                    halflife_mask &= (results_df['halflife_5y'] <= halflife_max)
+                    halflife_mask &= results_df['halflife_5y'].notna()
+                
+                # 组合筛选条件
+                significant_mask &= halflife_mask
+                
+                filtered_df = results_df[significant_mask].copy()
+                logger.info(f"筛选结果: {len(filtered_df)}/{len(results_df)} 个配对通过p值和半衰期筛选")
+            else:
+                filtered_df = results_df[significant_mask].copy()
+                logger.info(f"筛选结果: {len(filtered_df)}/{len(results_df)} 个配对通过p值筛选 (5年且1年 < {p_threshold})")
             
             if len(filtered_df) > 0:
-                # REQ-2.4.5: 按5年p值升序排序
-                filtered_df = filtered_df.sort_values('pvalue_5y').reset_index(drop=True)
+                # REQ-2.4.5: 按1年p值升序排序（近期协整性优先）
+                filtered_df = filtered_df.sort_values('pvalue_1y').reset_index(drop=True)
                 return filtered_df
         
         # 如果没有5年数据或筛选结果为空，返回所有结果
         logger.info("返回所有分析结果")
         return results_df.sort_values('pvalue_1y', na_position='last').reset_index(drop=True)
     
-    def get_top_pairs(self, n: int = 20) -> pd.DataFrame:
-        """获取前N个最佳配对"""
-        all_results = self.screen_all_pairs(p_threshold=1.0)  # 获取所有配对
+    def get_top_pairs(self, n: int = 20, **kwargs) -> pd.DataFrame:
+        """
+        获取前N个最佳配对
+        
+        Args:
+            n: 返回的配对数量
+            **kwargs: 传递给screen_all_pairs的参数
+        """
+        # 默认使用宽松的p值，获取所有配对
+        if 'p_threshold' not in kwargs:
+            kwargs['p_threshold'] = 1.0
+        
+        all_results = self.screen_all_pairs(**kwargs)
         return all_results.head(n)
     
     def export_results(self, filepath: str) -> None:

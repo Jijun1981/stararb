@@ -220,6 +220,7 @@ class SignalGenerator:
                  window: int = 60,
                  z_open: float = 2.0, 
                  z_close: float = 0.5,
+                 z_open_max: Optional[float] = None,
                  convergence_days: int = 20,
                  convergence_threshold: float = 0.01):
         """
@@ -227,14 +228,16 @@ class SignalGenerator:
         
         Args:
             window: 滚动窗口大小（默认60）
-            z_open: 开仓阈值（默认2.0）
+            z_open: 开仓阈值最小值（默认2.0）
             z_close: 平仓阈值（默认0.5）
+            z_open_max: 开仓阈值最大值（默认None，即无上限）
             convergence_days: 收敛判定天数（默认20）
             convergence_threshold: 收敛阈值（默认1%）
         """
         self.window = window
         self.z_open = z_open
         self.z_close = z_close
+        self.z_open_max = z_open_max
         self.convergence_days = convergence_days
         self.convergence_threshold = convergence_threshold
         
@@ -264,6 +267,10 @@ class SignalGenerator:
         """
         计算滚动Z-score - REQ-3.2.3
         
+        根据用户要求修正：当前点作为60个滚动窗口的最后一个点
+        - 使用包含当前点的window个点计算统计量
+        - 使用ddof=0计算标准差
+        
         Args:
             residuals: 残差序列
             window: 滚动窗口大小
@@ -271,10 +278,12 @@ class SignalGenerator:
         Returns:
             z_score: 当前残差的Z-score
         """
-        if len(residuals) < window:
+        if len(residuals) < window:  # 需要至少window个点
             return 0.0
         
-        window_data = residuals[-window:]
+        # 修正：使用包含当前点的window个点计算统计量
+        window_data = residuals[-window:]       # 包含当前点的最后window个点
+        current_residual = residuals[-1]       # 当前点的残差
         
         # 验证数据有效性
         valid_data = window_data[np.isfinite(window_data)]
@@ -283,13 +292,12 @@ class SignalGenerator:
             return 0.0
         
         mean = np.mean(valid_data)
-        std = np.std(valid_data, ddof=1)
+        std = np.std(valid_data, ddof=0)  # 修正：使用ddof=0与原始方法一致
         
         if std < 1e-10:
             logger.warning(f"滚动窗口标准差过小: {std}")
             return 0.0
         
-        current_residual = residuals[-1]
         z_score = (current_residual - mean) / std
         
         # 验证Z-score合理性
@@ -308,6 +316,7 @@ class SignalGenerator:
                        days_held: int,
                        z_open: Optional[float] = None,
                        z_close: Optional[float] = None,
+                       z_open_max: Optional[float] = None,
                        max_days: int = 30) -> str:
         """
         生成交易信号 - REQ-3.3.x
@@ -334,16 +343,24 @@ class SignalGenerator:
         if position and days_held >= max_days:
             return 'close'
         
-        # 平仓条件 - REQ-3.3.3
-        if position and abs(z_score) < z_close:
+        # 平仓条件 - REQ-3.3.3: |z| <= z_close
+        if position and abs(z_score) <= z_close:
             return 'close'
         
-        # 开仓条件 - REQ-3.3.2 (防重复开仓 - REQ-3.3.6)
+        # 开仓条件 - REQ-3.3.2: z_open <= |z| <= z_open_max (防重复开仓 - REQ-3.3.6)
         if not position:
-            if z_score < -z_open:
-                return 'open_long'
-            elif z_score > z_open:
-                return 'open_short'
+            abs_z = abs(z_score)
+            # 检查是否在开仓区间内 [z_open, z_open_max]
+            if z_open_max is not None:
+                in_range = z_open <= abs_z <= z_open_max
+            else:
+                in_range = abs_z >= z_open
+            
+            if in_range:
+                if z_score <= -z_open:  # 负Z-score开多
+                    return 'open_long'
+                elif z_score >= z_open:  # 正Z-score开空
+                    return 'open_short'
         
         return 'hold'
     
@@ -443,11 +460,13 @@ class SignalGenerator:
                 phase = 'signal_period'
                 
                 # 计算Z-score（需要足够历史数据）
+                # 修正：需要至少window个点（包含当前点的滚动窗口）
                 if len(residuals) >= self.window:
                     z_score = self.calculate_zscore(np.array(residuals), self.window)
                     
                     # 生成交易信号
-                    signal = self.generate_signal(z_score, position, days_held)
+                    signal = self.generate_signal(z_score, position, days_held, 
+                                                 z_open_max=self.z_open_max)
                     
                     # 更新持仓状态
                     if signal.startswith('open'):

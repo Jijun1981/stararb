@@ -491,8 +491,16 @@ def load_data(symbols: List[str],
         
         # 读取数据
         df = pd.read_parquet(file_path)
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.set_index('date')
+        
+        # 处理索引：聚宽数据索引已经是日期，AkShare数据有date列
+        if 'date' in df.columns:
+            # AkShare格式：有date列
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.set_index('date')
+        elif not isinstance(df.index, pd.DatetimeIndex):
+            # 如果索引不是日期类型，尝试转换
+            df.index = pd.to_datetime(df.index)
+            df.index.name = 'date'
         
         # 筛选日期范围
         if start_date:

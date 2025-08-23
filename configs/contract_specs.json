@@ -1,0 +1,128 @@
+{
+  "CU0": {
+    "name": "沪铜主力",
+    "exchange": "SHFE",
+    "multiplier": 5,
+    "tick_size": 10,
+    "margin_rate": 0.12,
+    "unit": "吨",
+    "currency": "CNY"
+  },
+  "AL0": {
+    "name": "沪铝主力", 
+    "exchange": "SHFE",
+    "multiplier": 5,
+    "tick_size": 5,
+    "margin_rate": 0.12,
+    "unit": "吨",
+    "currency": "CNY"
+  },
+  "ZN0": {
+    "name": "沪锌主力",
+    "exchange": "SHFE", 
+    "multiplier": 5,
+    "tick_size": 5,
+    "margin_rate": 0.12,
+    "unit": "吨",
+    "currency": "CNY"
+  },
+  "NI0": {
+    "name": "沪镍主力",
+    "exchange": "SHFE",
+    "multiplier": 1,
+    "tick_size": 10,
+    "margin_rate": 0.12,
+    "unit": "吨", 
+    "currency": "CNY"
+  },
+  "SN0": {
+    "name": "沪锡主力",
+    "exchange": "SHFE",
+    "multiplier": 1,
+    "tick_size": 10,
+    "margin_rate": 0.12,
+    "unit": "吨",
+    "currency": "CNY"
+  },
+  "PB0": {
+    "name": "沪铅主力",
+    "exchange": "SHFE",
+    "multiplier": 5,
+    "tick_size": 5,
+    "margin_rate": 0.12,
+    "unit": "吨",
+    "currency": "CNY"
+  },
+  "AG0": {
+    "name": "沪银主力",
+    "exchange": "SHFE", 
+    "multiplier": 15,
+    "tick_size": 1,
+    "margin_rate": 0.12,
+    "unit": "千克",
+    "currency": "CNY"
+  },
+  "AU0": {
+    "name": "沪金主力",
+    "exchange": "SHFE",
+    "multiplier": 1000,
+    "tick_size": 0.05,
+    "margin_rate": 0.12,
+    "unit": "克",
+    "currency": "CNY"
+  },
+  "RB0": {
+    "name": "螺纹钢主力",
+    "exchange": "SHFE",
+    "multiplier": 10,
+    "tick_size": 1,
+    "margin_rate": 0.12,
+    "unit": "吨", 
+    "currency": "CNY"
+  },
+  "HC0": {
+    "name": "热轧卷板主力",
+    "exchange": "SHFE",
+    "multiplier": 10,
+    "tick_size": 1,
+    "margin_rate": 0.12,
+    "unit": "吨",
+    "currency": "CNY"
+  },
+  "I0": {
+    "name": "铁矿石主力",
+    "exchange": "DCE",
+    "multiplier": 100,
+    "tick_size": 0.5,
+    "margin_rate": 0.12,
+    "unit": "吨",
+    "currency": "CNY"
+  },
+  "SF0": {
+    "name": "硅铁主力",
+    "exchange": "ZCE",
+    "multiplier": 5,
+    "tick_size": 2,
+    "margin_rate": 0.12,
+    "unit": "吨",
+    "currency": "CNY"
+  },
+  "SM0": {
+    "name": "锰硅主力", 
+    "exchange": "ZCE",
+    "multiplier": 5,
+    "tick_size": 2,
+    "margin_rate": 0.12,
+    "unit": "吨",
+    "currency": "CNY"
+  },
+  "SS0": {
+    "name": "不锈钢主力",
+    "exchange": "SHFE",
+    "multiplier": 5,
+    "tick_size": 5,
+    "margin_rate": 0.12,
+    "unit": "吨",
+    "currency": "CNY"
+  }
+}

@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data (keep structure but ignore large files)
+data/*.csv
+data/*.xlsx
+data/cache/
+*.pkl
+*.pickle
+
+# Output files
+output/
+logs/
+*.log
+
+# Reports (keep important ones in docs/)
+test_reports/
+*.html
+*.pdf
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+temp/
+tmp/
+
+# System files
+Thumbs.db
+.DS_Store
+
+# Credentials (never commit)
+.env
+config.ini
+secrets.yaml
+*.key
+*.pem
+
+# Large model files
+models/*.pkl
+models/*.h5
+models/*.pt
+models/*.pth
+models/*.onnx
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Documentation build
+docs/_build/
+docs/.doctrees/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
