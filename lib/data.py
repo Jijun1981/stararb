@@ -169,7 +169,7 @@ def load_all_symbols_data(symbols: Optional[List[str]] = None,
     if symbols is None:
         symbols = SYMBOLS
     
-    return load_data(symbols, start_date, end_date, columns=['close'], log_price=False)
+    return load_data(symbols, start_date, end_date, columns=['close'], log_price=True)
 
 
 def update_symbol_data(symbol: str) -> bool:

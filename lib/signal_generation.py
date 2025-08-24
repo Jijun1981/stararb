@@ -26,7 +26,7 @@ class AdaptiveKalmanFilter:
                  pair_name: str,
                  delta: float = 0.98,      # REQ-3.1.6: 初始δ=0.98
                  lambda_r: float = 0.96,    # REQ-3.1.4: λ=0.96
-                 beta_bounds: Tuple[float, float] = (-4, 4)):  # REQ-3.1.7
+                 beta_bounds: Optional[Tuple[float, float]] = None):  # 移除β边界限制
         """
         初始化自适应Kalman滤波器
         
@@ -133,8 +133,9 @@ class AdaptiveKalmanFilter:
         # 6. 状态更新
         beta_new = beta_pred + K * v
         
-        # 7. β边界保护 - REQ-3.1.7
-        beta_new = np.clip(beta_new, self.beta_bounds[0], self.beta_bounds[1])
+        # 7. β边界保护（可选）
+        if self.beta_bounds is not None:
+            beta_new = np.clip(beta_new, self.beta_bounds[0], self.beta_bounds[1])
         
         # 8. 后验协方差
         self.P = (1 - K * x_t) * P_prior
