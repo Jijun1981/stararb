@@ -46,17 +46,44 @@ class DataError(Exception):
     pass
 
 
-def engle_granger_test(x: np.ndarray, y: np.ndarray, 
-                      direction: str = 'y_on_x') -> Dict:
+def get_window_days(window_name: str, windows: Optional[Dict[str, int]] = None) -> int:
+    """
+    获取窗口名称对应的天数
+    
+    Args:
+        window_name: 窗口名称，如'1y', '2y', '6m'
+        windows: 自定义窗口字典
+    
+    Returns:
+        窗口对应的交易日天数
+    """
+    # 首先检查自定义窗口
+    if windows is not None and window_name in windows:
+        return windows[window_name]
+    
+    # 默认窗口映射
+    default_windows = {
+        '5y': 1260,
+        '4y': 1008, 
+        '3y': 756,
+        '2y': 504,
+        '1y': 252,
+        '18m': 378,
+        '6m': 126
+    }
+    
+    return default_windows.get(window_name, 0)
+
+
+def engle_granger_test(x: np.ndarray, y: np.ndarray) -> Dict:
     """
     Engle-Granger两步法协整检验
     
     实现: REQ-2.1.1
     
     Args:
-        x: 价格序列1 (自变量候选)
-        y: 价格序列2 (因变量候选)  
-        direction: 回归方向 'y_on_x' 或 'x_on_y'
+        x: 价格序列1 (自变量X)
+        y: 价格序列2 (因变量Y)
         
     Returns:
         {
@@ -65,7 +92,6 @@ def engle_granger_test(x: np.ndarray, y: np.ndarray,
             'beta': float,          # 回归系数β
             'alpha': float,         # 截距α
             'residuals': np.ndarray,# 残差序列
-            'direction': str,       # 回归方向
             'r_squared': float,     # R²
             'n_obs': int           # 观测数量
         }
@@ -87,23 +113,12 @@ def engle_granger_test(x: np.ndarray, y: np.ndarray,
         raise CointegrationError("输入数据包含NaN值")
     
     try:
-        # 第一步: OLS回归
-        if direction == 'y_on_x':
-            # Y = α + β*X + ε
-            X = add_constant(x)
-            model = OLS(y, X).fit()
-            alpha = model.params[0]
-            beta = model.params[1] 
-            residuals = model.resid
-        elif direction == 'x_on_y':
-            # X = α + β*Y + ε  
-            Y = add_constant(y)
-            model = OLS(x, Y).fit()
-            alpha = model.params[0]
-            beta = model.params[1]
-            residuals = model.resid
-        else:
-            raise CointegrationError(f"无效的回归方向: {direction}")
+        # 第一步: 统一使用Y对X回归 Y = α + β*X + ε
+        X = add_constant(x)
+        model = OLS(y, X).fit()
+        alpha = model.params[0]
+        beta = model.params[1] 
+        residuals = model.resid
         
         # 第二步: ADF检验残差平稳性
         # 使用无截距、无趋势的ADF检验
@@ -119,7 +134,6 @@ def engle_granger_test(x: np.ndarray, y: np.ndarray,
             'beta': round(beta, 6),  # REQ-2.3.1: β系数精确到6位小数
             'alpha': alpha,
             'residuals': residuals,
-            'direction': direction,
             'r_squared': model.rsquared,
             'n_obs': len(x)
         }
@@ -130,7 +144,7 @@ def engle_granger_test(x: np.ndarray, y: np.ndarray,
 
 
 def multi_window_test(x: np.ndarray, y: np.ndarray, 
-                     direction: Optional[str] = None) -> Dict:
+                     windows: Optional[Dict[str, int]] = None) -> Dict:
     """
     多时间窗口协整检验
     
@@ -139,34 +153,23 @@ def multi_window_test(x: np.ndarray, y: np.ndarray,
     Args:
         x: 价格序列1
         y: 价格序列2
-        direction: 回归方向，None表示自动判定
+        windows: 自定义时间窗口配置，格式为 {'名称': 交易日数量}
         
     Returns:
-        {
-            '5y': {...},  # 5年窗口结果，None如果数据不足
-            '4y': {...},  # 4年窗口结果
-            '3y': {...},  # 3年窗口结果  
-            '2y': {...},  # 2年窗口结果
-            '1y': {...}   # 1年窗口结果
-        }
+        按窗口名称返回检验结果字典，数据不足的窗口返回None
     """
-    # 时间窗口定义 (交易日)
-    windows = {
-        '5y': 1260,  # 5年 = 5×252
-        '4y': 1008,  # 4年 = 4×252  
-        '3y': 756,   # 3年 = 3×252
-        '2y': 504,   # 2年 = 2×252
-        '1y': 252    # 1年 = 252
-    }
+    # 默认时间窗口定义 (交易日)
+    if windows is None:
+        windows = {
+            '1y': 252,   # 1年 = 252
+            '2y': 504,   # 2年 = 2×252
+            '3y': 756,   # 3年 = 3×252
+            '4y': 1008,  # 4年 = 4×252  
+            '5y': 1260,  # 5年 = 5×252
+        }
     
     results = {}
     total_length = len(x)
-    
-    # 自动方向判定
-    if direction is None:
-        vol_x = np.std(np.diff(x)) if len(x) > 1 else 0
-        vol_y = np.std(np.diff(y)) if len(y) > 1 else 0
-        direction = 'y_on_x' if vol_y >= vol_x else 'x_on_y'
     
     for window_name, window_size in windows.items():
         if total_length >= window_size:
@@ -175,7 +178,7 @@ def multi_window_test(x: np.ndarray, y: np.ndarray,
                 x_window = x[-window_size:]
                 y_window = y[-window_size:]
                 
-                result = engle_granger_test(x_window, y_window, direction)
+                result = engle_granger_test(x_window, y_window)
                 results[window_name] = result
                 
             except Exception as e:
@@ -208,32 +211,40 @@ def adf_test(series: np.ndarray) -> Tuple[float, float]:
 
 def calculate_volatility(log_prices: np.ndarray, 
                         dates: pd.DatetimeIndex,
-                        start_date: Optional[str] = None) -> float:
+                        start_date: Optional[str] = None,
+                        end_date: Optional[str] = None) -> float:
     """
     计算年化波动率
     
-    实现: REQ-2.2.1至REQ-2.2.3, REQ-2.2.7
+    实现: REQ-2.2.1至REQ-2.2.3, REQ-2.2.5, REQ-2.2.6, REQ-2.2.7
     
     Args:
         log_prices: 对数价格序列
         dates: 对应的日期索引
-        start_date: 波动率计算起始日期（默认为最近1年）
+        start_date: 波动率计算起始日期（可选）
+        end_date: 波动率计算结束日期（可选）
         
     Returns:
         年化波动率
     """
     try:
-        # REQ-2.2.7: 默认使用最近1年数据
-        if start_date is None:
-            # 计算最近1年的起始日期
-            latest_date = dates[-1] if len(dates) > 0 else pd.Timestamp.now()
-            start_dt = latest_date - pd.Timedelta(days=365)
+        # REQ-2.2.5, REQ-2.2.6: 支持指定时间段计算
+        if start_date is None and end_date is None:
+            # REQ-2.2.6: 默认使用全部可用数据
+            mask = np.ones(len(dates), dtype=bool)
         else:
-            start_dt = pd.to_datetime(start_date)
-        mask = dates >= start_dt
+            mask = np.ones(len(dates), dtype=bool)
+            
+            if start_date is not None:
+                start_dt = pd.to_datetime(start_date)
+                mask &= (dates >= start_dt)
+            
+            if end_date is not None:
+                end_dt = pd.to_datetime(end_date)
+                mask &= (dates <= end_dt)
         
         if not np.any(mask):
-            logger.warning(f"没有找到{start_date}之后的数据，使用全部数据")
+            logger.warning(f"指定时间段内没有数据，使用全部数据")
             recent_prices = log_prices
         else:
             recent_prices = log_prices[mask]
@@ -257,11 +268,12 @@ def calculate_volatility(log_prices: np.ndarray,
 def determine_direction(series_1: np.ndarray, series_2: np.ndarray,
                        dates_1: pd.DatetimeIndex, dates_2: pd.DatetimeIndex,
                        symbol_1: str, symbol_2: str,
-                       start_date: Optional[str] = None) -> Tuple[str, str, str]:
+                       start_date: Optional[str] = None,
+                       end_date: Optional[str] = None) -> Tuple[str, str, str]:
     """
     基于波动率确定回归方向
     
-    实现: REQ-2.2.4至REQ-2.2.5, REQ-2.2.7
+    实现: REQ-2.2.4至REQ-2.2.7
     
     Args:
         series_1: 品种1的对数价格
@@ -270,7 +282,8 @@ def determine_direction(series_1: np.ndarray, series_2: np.ndarray,
         dates_2: 品种2的日期  
         symbol_1: 品种1代码
         symbol_2: 品种2代码
-        start_date: 计算波动率的起始日期（默认为最近1年）
+        start_date: 计算波动率的起始日期（可选）
+        end_date: 计算波动率的结束日期（可选）
         
     Returns:
         (direction, symbol_x, symbol_y)
@@ -280,8 +293,8 @@ def determine_direction(series_1: np.ndarray, series_2: np.ndarray,
     """
     try:
         # 计算两个品种的波动率
-        vol_1 = calculate_volatility(series_1, dates_1, start_date)
-        vol_2 = calculate_volatility(series_2, dates_2, start_date)
+        vol_1 = calculate_volatility(series_1, dates_1, start_date, end_date)
+        vol_2 = calculate_volatility(series_2, dates_2, start_date, end_date)
         
         if np.isnan(vol_1) or np.isnan(vol_2):
             logger.warning("波动率计算失败，使用默认方向")
@@ -552,18 +565,26 @@ class CointegrationAnalyzer:
         """协整检验接口"""
         return engle_granger_test(x, y)
     
-    def multi_window_test(self, x: np.ndarray, y: np.ndarray) -> Dict:
+    def multi_window_test(self, x: np.ndarray, y: np.ndarray,
+                         windows: Optional[Dict[str, int]] = None) -> Dict:
         """多窗口协整检验接口"""
-        return multi_window_test(x, y)
+        return multi_window_test(x, y, windows)
     
     def adf_test(self, series: np.ndarray) -> Tuple[float, float]:
         """ADF检验接口"""
         return adf_test(series)
     
-    def calculate_volatility(self, log_prices: np.ndarray, 
-                           start_date: Optional[str] = None) -> float:
+    def calculate_volatility(self, log_prices: np.ndarray,
+                           start_date: Optional[str] = None,
+                           end_date: Optional[str] = None) -> float:
         """波动率计算接口"""
-        return calculate_volatility(log_prices, self.data.index, start_date)
+        # 创建对应长度的日期索引
+        if len(log_prices) == len(self.data.index):
+            dates = self.data.index
+        else:
+            # 如果长度不匹配，使用最新的对应长度的日期
+            dates = self.data.index[-len(log_prices):]
+        return calculate_volatility(log_prices, dates, start_date, end_date)
     
     def determine_direction(self, symbol_x: str, symbol_y: str, 
                           use_recent: bool = True,
@@ -595,6 +616,15 @@ class CointegrationAnalyzer:
             symbol_x, symbol_y, start_date
         )
     
+    def test_pair_cointegration(self, x: np.ndarray, y: np.ndarray) -> Dict:
+        """协整检验接口（别名）"""
+        return self.engle_granger_test(x, y)
+    
+    def calculate_beta(self, x: np.ndarray, y: np.ndarray) -> float:
+        """Beta系数估计接口"""
+        params = estimate_parameters(x, y)
+        return params.get('beta', np.nan)
+    
     def estimate_parameters(self, x: np.ndarray, y: np.ndarray) -> Dict:
         """参数估计接口"""
         return estimate_parameters(x, y)
@@ -607,8 +637,71 @@ class CointegrationAnalyzer:
         """残差统计接口"""
         return residual_statistics(residuals)
     
-    def screen_all_pairs(self, 
-                        p_threshold: float = 0.05,
+    def determine_symbols(self, symbol1: str, symbol2: str,
+                         vol_start_date: Optional[str] = None,
+                         vol_end_date: Optional[str] = None) -> Tuple[str, str]:
+        """
+        基于波动率确定品种角色
+        
+        实现: REQ-2.2.4至REQ-2.2.7
+        
+        Args:
+            symbol1: 品种1代码
+            symbol2: 品种2代码
+            vol_start_date: 波动率计算起始日期（可选）
+            vol_end_date: 波动率计算结束日期（可选）
+            
+        Returns:
+            (symbol_x, symbol_y): 低波动品种作为X，高波动品种作为Y
+        """
+        try:
+            # 获取两个品种的对数价格数据
+            data1 = self.data[symbol1].values
+            data2 = self.data[symbol2].values
+            
+            # 计算波动率
+            vol1 = self.calculate_volatility(data1, vol_start_date, vol_end_date)
+            vol2 = self.calculate_volatility(data2, vol_start_date, vol_end_date)
+            
+            # 如果波动率计算失败，使用字母顺序
+            if np.isnan(vol1) or np.isnan(vol2):
+                logger.warning(f"波动率计算失败，使用字母顺序: {symbol1}, {symbol2}")
+                if symbol1 <= symbol2:
+                    return symbol1, symbol2
+                else:
+                    return symbol2, symbol1
+            
+            # 低波动作为X，高波动作为Y
+            if vol1 < vol2:
+                return symbol1, symbol2  # symbol1是X，symbol2是Y
+            elif vol1 > vol2:
+                return symbol2, symbol1  # symbol2是X，symbol1是Y
+            else:
+                # 波动率相等时按字母顺序
+                if symbol1 <= symbol2:
+                    return symbol1, symbol2
+                else:
+                    return symbol2, symbol1
+                    
+        except Exception as e:
+            logger.error(f"品种角色确定失败: {e}")
+            # 回退到字母顺序
+            if symbol1 <= symbol2:
+                return symbol1, symbol2
+            else:
+                return symbol2, symbol1
+    
+    def screen_all_pairs(self,
+                        screening_windows: Optional[List[str]] = None,
+                        p_thresholds: Optional[Dict[str, float]] = None,
+                        filter_logic: str = 'AND',
+                        sort_by: str = 'pvalue_1y',
+                        ascending: bool = True,
+                        vol_start_date: Optional[str] = None,
+                        vol_end_date: Optional[str] = None,
+                        windows: Optional[Dict[str, int]] = None,
+                        # 向后兼容参数
+                        p_threshold: Optional[float] = None,
                         halflife_min: Optional[float] = None,
                         halflife_max: Optional[float] = None,
                         use_halflife_filter: bool = False,
@@ -616,19 +709,39 @@ class CointegrationAnalyzer:
         """
         批量筛选所有可能的配对
         
-        实现: REQ-2.4.1至REQ-2.4.8
+        实现: REQ-2.4.1至REQ-2.4.9
         
         Args:
-            p_threshold: p值筛选阈值（默认0.05）
-            halflife_min: 最小半衰期阈值（可选）
-            halflife_max: 最大半衰期阈值（可选）
-            use_halflife_filter: 是否启用半衰期筛选（默认False）
-            volatility_start_date: 波动率计算起始日期（默认为最近1年）
+            screening_windows: 筛选用的时间窗口列表（可选，默认['5y'])
+            p_thresholds: 各窗口的p值阈值字典（可选，默认{'5y': 0.05}）
+            filter_logic: 筛选逻辑，'AND'或'OR'（默认'AND'）
+            sort_by: 排序字段（默认'pvalue_1y'）
+            ascending: 排序方向（默认True升序）
+            vol_start_date: 波动率计算起始日期（可选）
+            vol_end_date: 波动率计算结束日期（可选）
+            windows: 自定义时间窗口字典（可选）
             
         Returns:
-            配对结果DataFrame，按1年p值升序排序
+            配对结果DataFrame
         """
+        # 向后兼容处理
+        if p_threshold is not None:
+            # 使用旧参数格式
+            screening_windows = ['5y', '1y']
+            p_thresholds = {'5y': p_threshold, '1y': p_threshold}
+            if volatility_start_date is not None:
+                vol_start_date = volatility_start_date
+        
+        # 默认参数设置
+        if screening_windows is None:
+            screening_windows = ['5y']
+        if p_thresholds is None:
+            p_thresholds = {'5y': 0.05}
+        
         logger.info(f"开始批量分析{self.n_symbols}个品种的所有配对...")
+        logger.info(f"筛选窗口: {screening_windows}")
+        logger.info(f"p值阈值: {p_thresholds}")
+        logger.info(f"筛选逻辑: {filter_logic}")
         
         # REQ-2.4.1: 生成所有可能配对 C(n,2)
         all_pairs = list(combinations(self.symbols, 2))
@@ -643,63 +756,57 @@ class CointegrationAnalyzer:
                 logger.info(f"分析进度: {i}/{total_pairs}")
             
             try:
-                # 获取数据
-                x_data = self.data[symbol1].values
-                y_data = self.data[symbol2].values
-                
-                # 方向判定 (基于最近数据波动率)
-                direction, symbol_x, symbol_y = self.determine_direction(
-                    symbol1, symbol2, use_recent=True, recent_start=volatility_start_date
+                # 品种角色确定
+                symbol_x, symbol_y = self.determine_symbols(
+                    symbol1, symbol2, vol_start_date=vol_start_date, vol_end_date=vol_end_date
                 )
                 
-                # 确定最终的X和Y序列
-                if symbol_x == symbol1:
-                    x_final = x_data
-                    y_final = y_data
-                else:
-                    x_final = y_data  # 交换
-                    y_final = x_data
+                # 获取最终的X和Y序列
+                x_final = self.data[symbol_x].values
+                y_final = self.data[symbol_y].values
                 
                 # 多窗口协整检验
-                multi_results = multi_window_test(x_final, y_final, direction)
+                multi_results = multi_window_test(x_final, y_final, windows)
                 
                 # 构建结果记录
                 pair_result = {
                     'pair': f"{symbol_x}-{symbol_y}",
                     'symbol_x': symbol_x,
                     'symbol_y': symbol_y,
-                    'direction': direction,
                 }
                 
                 # 添加各窗口的p值和β值
-                windows = ['5y', '4y', '3y', '2y', '1y']
-                for window in windows:
-                    if multi_results[window] is not None:
-                        pair_result[f'pvalue_{window}'] = multi_results[window]['pvalue']
+                for window_name, window_result in multi_results.items():
+                    if window_result is not None:
+                        pair_result[f'pvalue_{window_name}'] = window_result['pvalue']
                         # REQ-2.3.1: β系数精确到6位小数
-                        pair_result[f'beta_{window}'] = round(multi_results[window]['beta'], 6)
+                        pair_result[f'beta_{window_name}'] = round(window_result['beta'], 6)
                         
-                        # REQ-2.3.2: 计算所有窗口的半衰期（API要求）
-                        halflife = calculate_halflife(multi_results[window]['residuals'])
-                        pair_result[f'halflife_{window}'] = halflife
+                        # REQ-2.3.2: 计算半衰期
+                        halflife = calculate_halflife(window_result['residuals'])
+                        pair_result[f'halflife_{window_name}'] = halflife
                     else:
-                        pair_result[f'pvalue_{window}'] = np.nan
-                        pair_result[f'beta_{window}'] = np.nan
-                        pair_result[f'halflife_{window}'] = np.nan
+                        pair_result[f'pvalue_{window_name}'] = np.nan
+                        pair_result[f'beta_{window_name}'] = np.nan
+                        pair_result[f'halflife_{window_name}'] = np.nan
                 
                 # 计算波动率信息  
                 vol_x = self.calculate_volatility(
-                    self.data[symbol_x].values, start_date=volatility_start_date
+                    self.data[symbol_x].values, vol_start_date, vol_end_date
                 )
                 vol_y = self.calculate_volatility(
-                    self.data[symbol_y].values, start_date=volatility_start_date
+                    self.data[symbol_y].values, vol_start_date, vol_end_date
                 )
                 
                 # 记录波动率计算的时间段
-                if volatility_start_date:
-                    vol_period = f'{volatility_start_date} to latest'
+                if vol_start_date and vol_end_date:
+                    vol_period = f'{vol_start_date} to {vol_end_date}'
+                elif vol_start_date:
+                    vol_period = f'{vol_start_date} to latest'
+                elif vol_end_date:
+                    vol_period = f'earliest to {vol_end_date}'
                 else:
-                    vol_period = 'recent 1 year'
+                    vol_period = 'all available data'
                     
                 pair_result.update({
                     'volatility_x': vol_x,
@@ -707,12 +814,22 @@ class CointegrationAnalyzer:
                     'volatility_period': vol_period
                 })
                 
-                # 添加5年窗口的详细统计 (如果存在)
-                if multi_results['5y'] is not None:
-                    pair_result['r_squared_5y'] = multi_results['5y']['r_squared']
+                # 添加最长窗口的详细统计 (如果存在)
+                longest_window = None
+                longest_days = 0
+                for window_name, window_result in multi_results.items():
+                    if window_result is not None:
+                        # 获取窗口的天数
+                        window_days = get_window_days(window_name, windows)
+                        if window_days > longest_days:
+                            longest_days = window_days
+                            longest_window = window_name
+                
+                if longest_window is not None:
+                    pair_result[f'r_squared_{longest_window}'] = multi_results[longest_window]['r_squared']
                     
                     # 残差统计
-                    resid_stats = residual_statistics(multi_results['5y']['residuals'])
+                    resid_stats = residual_statistics(multi_results[longest_window]['residuals'])
                     pair_result.update(resid_stats)
                 
                 results.append(pair_result)
@@ -728,42 +845,66 @@ class CointegrationAnalyzer:
             logger.warning("没有成功分析的配对")
             return results_df
         
-        # REQ-2.4.3: 筛选条件：5年p值 < 阈值 且 1年p值 < 阈值
-        if 'pvalue_5y' in results_df.columns and 'pvalue_1y' in results_df.columns:
-            # p值筛选
-            significant_mask = (results_df['pvalue_5y'] < p_threshold) & \
-                             (results_df['pvalue_1y'] < p_threshold)
-            
-            # REQ-2.4.7-2.4.8: 可选的半衰期筛选
-            if use_halflife_filter and ('halflife_5y' in results_df.columns):
-                logger.info(f"启用半衰期筛选: [{halflife_min}, {halflife_max}]")
-                halflife_mask = pd.Series([True] * len(results_df))
-                
-                if halflife_min is not None:
-                    halflife_mask &= (results_df['halflife_5y'] >= halflife_min)
-                    halflife_mask &= results_df['halflife_5y'].notna()
-                
-                if halflife_max is not None:
-                    halflife_mask &= (results_df['halflife_5y'] <= halflife_max)
-                    halflife_mask &= results_df['halflife_5y'].notna()
-                
-                # 组合筛选条件
-                significant_mask &= halflife_mask
-                
-                filtered_df = results_df[significant_mask].copy()
-                logger.info(f"筛选结果: {len(filtered_df)}/{len(results_df)} 个配对通过p值和半衰期筛选")
-            else:
-                filtered_df = results_df[significant_mask].copy()
-                logger.info(f"筛选结果: {len(filtered_df)}/{len(results_df)} 个配对通过p值筛选 (5年且1年 < {p_threshold})")
-            
-            if len(filtered_df) > 0:
-                # REQ-2.4.5: 按1年p值升序排序（近期协整性优先）
-                filtered_df = filtered_df.sort_values('pvalue_1y').reset_index(drop=True)
-                return filtered_df
+        # REQ-2.4.3至2.4.5: 灵活筛选条件
+        # 构建筛选条件
+        filter_masks = []
+        for window in screening_windows:
+            pvalue_col = f'pvalue_{window}'
+            if pvalue_col in results_df.columns and window in p_thresholds:
+                threshold = p_thresholds[window]
+                mask = (results_df[pvalue_col] < threshold) & (results_df[pvalue_col].notna())
+                filter_masks.append(mask)
+                logger.info(f"窗口 {window}: p值阈值 {threshold}")
         
-        # 如果没有5年数据或筛选结果为空，返回所有结果
-        logger.info("返回所有分析结果")
-        return results_df.sort_values('pvalue_1y', na_position='last').reset_index(drop=True)
+        if filter_masks:
+            # 应用筛选逻辑
+            if filter_logic == 'AND':
+                final_mask = filter_masks[0]
+                for mask in filter_masks[1:]:
+                    final_mask &= mask
+            else:  # OR
+                final_mask = filter_masks[0]
+                for mask in filter_masks[1:]:
+                    final_mask |= mask
+                    
+            filtered_df = results_df[final_mask].copy()
+            logger.info(f"筛选结果: {len(filtered_df)}/{len(results_df)} 个配对通过筛选 ({filter_logic}逻辑)")
+        else:
+            # 没有筛选条件，返回所有结果
+            filtered_df = results_df.copy()
+            logger.info("无筛选条件，返回所有结果")
+        
+        # REQ-2.4.7: 排序
+        if len(filtered_df) > 0 and sort_by in filtered_df.columns:
+            filtered_df = filtered_df.sort_values(sort_by, ascending=ascending, na_position='last').reset_index(drop=True)
+            logger.info(f"按 {sort_by} {'升序' if ascending else '降序'} 排序")
+        
+        return filtered_df
+    
+    def screen_all_pairs_legacy(self, 
+                               p_threshold: float = 0.05,
+                               halflife_min: Optional[float] = None,
+                               halflife_max: Optional[float] = None,
+                               use_halflife_filter: bool = False,
+                               volatility_start_date: Optional[str] = None) -> pd.DataFrame:
+        """
+        向后兼容的筛选方法
+        
+        将旧接口参数转换为新接口调用
+        """
+        # 转换为新接口参数
+        screening_windows = ['5y', '1y']
+        p_thresholds = {'5y': p_threshold, '1y': p_threshold}
+        
+        return self.screen_all_pairs(
+            screening_windows=screening_windows,
+            p_thresholds=p_thresholds,
+            filter_logic='AND',
+            sort_by='pvalue_1y',
+            ascending=True,
+            vol_start_date=volatility_start_date,
+            vol_end_date=None
+        )
     
     def get_top_pairs(self, n: int = 20, **kwargs) -> pd.DataFrame:
         """
@@ -773,11 +914,15 @@ class CointegrationAnalyzer:
             n: 返回的配对数量
             **kwargs: 传递给screen_all_pairs的参数
         """
-        # 默认使用宽松的p值，获取所有配对
-        if 'p_threshold' not in kwargs:
-            kwargs['p_threshold'] = 1.0
-        
-        all_results = self.screen_all_pairs(**kwargs)
+        # 检查是否使用了旧的参数格式
+        if any(key in kwargs for key in ['p_threshold', 'halflife_min', 'halflife_max', 'use_halflife_filter', 'volatility_start_date']):
+            # 使用向后兼容方法
+            all_results = self.screen_all_pairs_legacy(**kwargs)
+        else:
+            # 使用新接口，默认返回所有结果
+            if 'p_thresholds' not in kwargs:
+                kwargs['p_thresholds'] = {'5y': 1.0}  # 宽松阈值
+            all_results = self.screen_all_pairs(**kwargs)
         return all_results.head(n)
     
     def export_results(self, filepath: str) -> None:

@@ -47,8 +47,9 @@
 - 筛选逻辑: 4年p值 < 0.05 AND 1年p值 < 0.10
 
 【信号生成参数】
-- 开仓Z-score阈值: 2.0 (调整为2.0，与实际使用一致)
-- 平仓Z-score阈值: 0.5 (调整为0.5，与实际使用一致)
+- 开仓Z-score阈值: 2.2 (回到原始设置)
+- 平仓Z-score阈值: 0.3 (回到原始设置)
+- Z-score上限: 3.2 (超过此值不开仓)
 - 滚动窗口: 60个交易日
 - 最大持仓天数: 30天
 - 收敛阈值: 1%
@@ -63,7 +64,7 @@
 - 保证金率: 12%
 - 手续费率: 万分之2 (0.02%)
 - 滑点: 3个tick
-- 止损比例: 10% (基于保证金)
+- 止损比例: 15% (基于保证金)
 - 最大持仓天数: 30天
 
 【合约规格】
@@ -146,11 +147,11 @@ COINT_CONFIG = {
     'volatility_start': '2023-01-01'  # 波动率计算起始（用于方向判定）
 }
 
-# 信号生成参数 - 调整为实际使用的阈值
+# 信号生成参数 - 回到用户要求的设置
 SIGNAL_CONFIG = {
-    'z_open': 2.0,     # 开仓阈值调整到2.0
-    # 'z_open_max': 3.2, # 移除上限限制，允许任何Z-score>=2.0开仓
-    'z_close': 0.5,    # 平仓阈值调整到0.5
+    'z_open': 2.2,     # 开仓阈值回到2.2
+    'z_open_max': 3.2, # 重新启用上限限制，z>3.2不操作
+    'z_close': 0.3,    # 平仓阈值回到0.3
     'window': 60,      # 滚动窗口
     'max_holding_days': 30,  # 最大持仓天数
     'convergence_threshold': 0.01  # 1%收敛阈值
@@ -168,7 +169,7 @@ BACKTEST_CONFIG = {
     'margin_rate': 0.12,
     'commission_rate': 0.0002,
     'slippage_ticks': 3,
-    'stop_loss_pct': 0.10,  # 收紧止损到10%
+    'stop_loss_pct': 0.15,  # 止损调整到15%
     'max_holding_days': 30
 }
 
@@ -343,21 +344,17 @@ def step2_calculate_initial_betas(pairs_df: pd.DataFrame) -> Dict:
         x_train = training_data[symbol_x].values
         y_train = training_data[symbol_y].values
         
-        # 计算OLS Beta
-        beta_ols = calculate_ols_beta(x_train, y_train)
-        
-        # 使用4年Beta作为初始值（如果可用），否则用OLS
-        beta_initial = row.get('beta_4y', beta_ols) if not pd.isna(row.get('beta_4y')) else beta_ols
+        # 计算2022年一年OLS Beta作为Kalman初始值
+        beta_initial = calculate_ols_beta(y_train, x_train, window=len(y_train))
         
         pairs_params[pair_name] = {
             'symbol_x': symbol_x,
             'symbol_y': symbol_y,
             'beta_initial': beta_initial,
-            'beta_ols': beta_ols,
             'direction': row['direction']
         }
         
-        logger.info(f"{pair_name}: β_initial={beta_initial:.4f}, β_OLS={beta_ols:.4f}")
+        logger.info(f"{pair_name}: β_initial={beta_initial:.4f}")
     
     return pairs_params
 

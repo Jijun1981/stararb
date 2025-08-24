@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-回测框架模块 - 执行交易信号并计算真实PnL
+回测框架v4 - 参数化版本
+与需求文档完全对齐，支持灵活的参数配置
 
 主要功能：
-1. 交易执行：根据信号和仓位权重计算手数，执行开平仓
-2. 资金管理：逐日盯市结算，保证金管理，强平控制  
-3. PnL计算：精确计算盈亏，包含滑点和手续费
-4. 绩效分析：计算夏普比率、最大回撤等关键指标
-5. 风险控制：止损、时间止损、强制平仓
+1. 参数化配置：所有关键参数可配置
+2. 基于动态β值的最小整数比手数计算
+3. 精确的PnL计算（含手续费和滑点）
+4. 风险控制：15%止损和30天强制平仓
+5. 与信号生成模块输出格式完全对齐
 
 作者：Claude
-创建时间：2025-08-20
+创建时间：2025-08-23
 """
 
 import pandas as pd
 import numpy as np
+from fractions import Fraction
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -23,1372 +25,685 @@ import logging
 from pathlib import Path
 
 # 配置日志
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-@dataclass 
+@dataclass
+class BacktestConfig:
+    """回测配置参数（所有可调参数）"""
+    
+    # ========== 资金管理参数 ==========
+    initial_capital: float = 5000000      # 初始资金
+    margin_rate: float = 0.12             # 保证金率
+    position_weight: float = 0.05         # 默认仓位权重（每个配对）
+    position_weights: Dict[str, float] = field(default_factory=dict)  # 配对个性化权重
+    
+    # ========== 交易成本参数 ==========
+    commission_rate: float = 0.0002       # 手续费率（单边）
+    slippage_ticks: int = 3              # 滑点tick数
+    
+    # ========== 风险控制参数 ==========
+    stop_loss_pct: float = 0.15          # 止损比例（相对保证金）
+    max_holding_days: int = 30           # 最大持仓天数
+    enable_stop_loss: bool = True        # 是否启用止损
+    enable_time_stop: bool = True        # 是否启用时间止损
+    
+    # ========== 信号参数 ==========
+    z_open_threshold: float = 2.0        # 开仓Z-score阈值
+    z_close_threshold: float = 0.5       # 平仓Z-score阈值
+    
+    # ========== 手数计算参数 ==========
+    max_denominator: int = 10            # 最大分母（用于Fraction）
+    min_lots: int = 1                    # 最小手数
+    max_lots_per_leg: int = 100          # 每腿最大手数限制
+    
+    # ========== 执行控制参数 ==========
+    allow_multiple_positions: bool = False  # 是否允许同一配对多个持仓
+    force_close_at_end: bool = True        # 回测结束时是否强制平仓
+    
+    # ========== 输出参数 ==========
+    save_trades: bool = True             # 是否保存交易记录
+    save_daily_pnl: bool = True          # 是否保存每日PnL
+    output_dir: str = "output/backtest"  # 输出目录
+
+
+@dataclass
 class Position:
     """持仓记录"""
-    # 必需字段（无默认值）
     pair: str
-    direction: str  # 'long_spread' or 'short_spread'
-    spread_formula: str
-    open_date: datetime
-    position_weight: float
-    symbol_y: str
     symbol_x: str
-    contracts_y: int  # Y合约手数
-    contracts_x: int  # X合约手数
-    beta: float  # Kalman滤波的beta
-    open_price_y: float
+    symbol_y: str
+    direction: str              # 'open_long' or 'open_short'
+    open_date: datetime
+    
+    # 手数信息（基于β计算）
+    beta: float                 # 动态β值
+    lots_x: int                # X品种手数
+    lots_y: int                # Y品种手数
+    theoretical_ratio: float    # 理论比例
+    actual_ratio: float        # 实际比例
+    
+    # 价格信息（含滑点）
     open_price_x: float
+    open_price_y: float
+    
+    # 保证金和成本
     margin_occupied: float
     open_commission: float
     
-    # 可选字段（有默认值）
-    ols_beta: float = np.nan  # 60天滚动OLS的beta
-    open_z_score: float = 0.0  # 开仓时的Z-score
-    prev_price_y: float = 0.0
-    prev_price_x: float = 0.0
+    # 合约规格
+    multiplier_x: float
+    multiplier_y: float
+    tick_size_x: float
+    tick_size_y: float
+    
+    # 浮动盈亏
     unrealized_pnl: float = 0.0
-    multiplier_y: float = 1.0
-    multiplier_x: float = 1.0
-
-
-class PositionManager:
-    """
-    仓位管理器 - 负责资金管理和逐日盯市
+    max_loss: float = 0.0      # 记录最大浮亏（用于止损）
     
-    重要原则：
-    - 浮盈亏每日结算后计入可用资金
-    - 权益 = 可用资金 + 占用保证金（不重复加浮盈亏）
-    """
-    
-    def __init__(self, initial_capital: float, margin_rate: float = 0.12):
-        self.initial_capital = initial_capital
-        self.margin_rate = margin_rate
-        
-        # 核心资金状态
-        self.available_capital = initial_capital  # 可用资金（已含浮盈亏）
-        self.occupied_margin = 0.0               # 占用保证金
-        self.total_equity = initial_capital      # 总权益
-        
-        # 持仓记录
-        self.positions: Dict[str, Position] = {}
-        
-        # 历史记录
-        self.daily_records = []
-        self.total_pnl = 0.0
-        
-    def can_open_position(self, required_margin: float) -> bool:
-        """检查是否有足够资金开仓"""
-        return self.available_capital >= required_margin
-        
-    def add_position(self, position: Position) -> None:
-        """添加新持仓"""
-        self.positions[position.pair] = position
-        self.available_capital -= position.margin_occupied
-        self.occupied_margin += position.margin_occupied
-        logger.info(f"开仓 {position.pair}: 占用保证金 {position.margin_occupied:,.0f}")
-        
-    def remove_position(self, pair: str) -> Optional[Position]:
-        """移除持仓并释放保证金"""
-        if pair not in self.positions:
-            return None
-            
-        position = self.positions.pop(pair)
-        self.available_capital += position.margin_occupied
-        self.occupied_margin -= position.margin_occupied
-        logger.info(f"平仓 {pair}: 释放保证金 {position.margin_occupied:,.0f}")
-        return position
-        
-    def daily_settlement(self, prices: Dict[str, float]) -> Dict[str, float]:
-        """
-        逐日盯市结算
-        
-        Args:
-            prices: 当日收盘价格字典 {'CU0': 45000, 'SN0': 150000, ...}
-            
-        Returns:
-            结算结果字典
-        """
-        if not self.positions:
-            # 无持仓时直接更新权益
-            self.total_equity = self.available_capital
-            return {
-                'available_capital': self.available_capital,
-                'occupied_margin': 0.0, 
-                'total_equity': self.total_equity,
-                'daily_pnl': 0.0,
-                'position_count': 0
-            }
-            
-        daily_pnl = 0.0
-        
-        for pair, pos in self.positions.items():
-            # 获取当前价格
-            try:
-                current_y = prices[pos.symbol_y] 
-                current_x = prices[pos.symbol_x]
-            except KeyError as e:
-                logger.warning(f"价格数据缺失: {e}, 跳过 {pair} 的盯市结算")
-                continue
-                
-            # 计算当日价格变动PnL
-            if pos.prev_price_y > 0 and pos.prev_price_x > 0:
-                y_pnl = (current_y - pos.prev_price_y) * pos.contracts_y * pos.multiplier_y
-                x_pnl = (current_x - pos.prev_price_x) * pos.contracts_x * pos.multiplier_x
-                
-                # 根据方向计算净PnL
-                if pos.direction == 'long_spread':
-                    # 做多价差：多Y空X
-                    pos_pnl = y_pnl - x_pnl
-                else:
-                    # 做空价差：空Y多X  
-                    pos_pnl = -y_pnl + x_pnl
-                    
-                daily_pnl += pos_pnl
-                pos.unrealized_pnl += pos_pnl
-                
-            # 更新前日价格
-            pos.prev_price_y = current_y
-            pos.prev_price_x = current_x
-            
-        # 浮盈亏结算到可用资金
-        self.available_capital += daily_pnl
-        
-        # 更新总权益（浮盈亏已在可用资金中）
-        self.total_equity = self.available_capital + self.occupied_margin
-        
-        # 记录当日结算
-        settlement_record = {
-            'available_capital': self.available_capital,
-            'occupied_margin': self.occupied_margin,
-            'total_equity': self.total_equity, 
-            'daily_pnl': daily_pnl,
-            'position_count': len(self.positions)
-        }
-        
-        self.daily_records.append(settlement_record.copy())
-        
-        return settlement_record
-        
-    def check_margin_call(self) -> bool:
-        """检查是否触发强平（可用资金<0）"""
-        return self.available_capital < 0
-        
-    def update_equity(self) -> float:
-        """更新并返回当前权益"""
-        self.total_equity = self.available_capital + self.occupied_margin
-        return self.total_equity
+    # 其他信息
+    z_score_open: float = 0.0  # 开仓时的Z-score
+    holding_days: int = 0       # 持仓天数
 
 
 class BacktestEngine:
     """
-    回测引擎 - 核心回测逻辑
+    参数化回测引擎
     
-    功能：
-    1. 交易执行：开平仓操作
-    2. 手数计算：基于权重和资金分配
-    3. PnL计算：包含滑点和手续费
-    4. 绩效分析：计算各种指标
+    核心原则：
+    1. 所有关键参数可配置
+    2. 与信号生成模块输出格式对齐
+    3. 基于动态β值计算手数
+    4. 精确的PnL和风险管理
     """
     
-    def __init__(self, 
-                 initial_capital: float = 5000000,
-                 margin_rate: float = 0.12,
-                 commission_rate: float = 0.0002,  # 单边费率
-                 slippage_ticks: int = 3,
-                 position_weights: Optional[Dict[str, float]] = None,
-                 stop_loss_pct: float = 0.15,  # 止损比例（相对保证金）
-                 max_holding_days: int = 30):  # 最大持仓天数
+    def __init__(self, config: BacktestConfig = None):
         """
         初始化回测引擎
         
         Args:
-            initial_capital: 初始资金
-            margin_rate: 保证金比例
-            commission_rate: 手续费率（单边）
-            slippage_ticks: 滑点tick数
-            position_weights: 配对权重分配 {'pair1': 0.05, ...}
-            stop_loss_pct: 止损比例（相对于保证金）
-            max_holding_days: 最大持仓天数
+            config: 回测配置，None则使用默认配置
         """
-        self.initial_capital = initial_capital
-        self.margin_rate = margin_rate
-        self.commission_rate = commission_rate
-        self.slippage_ticks = slippage_ticks
-        self.stop_loss_pct = stop_loss_pct
-        self.max_holding_days = max_holding_days
+        self.config = config or BacktestConfig()
         
-        # 默认均等权重分配
-        self.position_weights = position_weights or {}
+        # 资金状态
+        self.available_capital = self.config.initial_capital
+        self.occupied_margin = 0.0
+        self.total_equity = self.config.initial_capital
         
-        # 初始化仓位管理器
-        self.position_manager = PositionManager(initial_capital, margin_rate)
+        # 持仓管理
+        self.positions: Dict[str, Position] = {}
         
         # 交易记录
         self.trade_records: List[Dict] = []
-        self.trade_id_counter = 1
+        self.trade_id = 1
         
-        # 权益曲线
+        # 绩效记录
         self.equity_curve = []
-        self.daily_returns = []
+        self.daily_pnl = []
         
-        # 合约规格（需要从外部提供）
+        # 合约规格（需要外部加载）
         self.contract_specs = {}
+        
+        logger.info(f"回测引擎初始化完成")
+        logger.info(f"  初始资金: {self.config.initial_capital:,.0f}")
+        logger.info(f"  保证金率: {self.config.margin_rate:.1%}")
+        logger.info(f"  手续费率: {self.config.commission_rate:.4%}")
+        logger.info(f"  止损线: {self.config.stop_loss_pct:.1%}")
         
     def load_contract_specs(self, specs_file: str) -> None:
         """加载合约规格"""
-        if Path(specs_file).exists():
-            with open(specs_file, 'r', encoding='utf-8') as f:
+        specs_path = Path(specs_file)
+        if specs_path.exists():
+            with open(specs_path, 'r', encoding='utf-8') as f:
                 self.contract_specs = json.load(f)
+            logger.info(f"加载合约规格: {len(self.contract_specs)}个品种")
         else:
-            logger.warning(f"合约规格文件不存在: {specs_file}")
-            
-    def _prepare_lots_info_from_signal(self, signal: Dict, current_prices: Dict[str, float]) -> Optional[Dict]:
+            logger.error(f"合约规格文件不存在: {specs_file}")
+    
+    def calculate_min_lots(self, beta: float) -> Dict:
         """
-        从信号中准备手数信息（用于外部指定手数）
+        根据β值计算最小整数比手数（REQ-4.1.1）
+        
+        Args:
+            beta: 动态β值（来自信号）
+            
+        Returns:
+            手数分配结果
         """
-        try:
-            pair = signal['pair']
-            symbol_x, symbol_y = pair.split('-')
-            
-            # 获取基础符号
-            base_symbol_x = symbol_x.replace('_close', '') if '_close' in symbol_x else symbol_x
-            base_symbol_y = symbol_y.replace('_close', '') if '_close' in symbol_y else symbol_y
-            
-            # 获取合约规格
-            if base_symbol_y not in self.contract_specs or base_symbol_x not in self.contract_specs:
-                return None
-                
-            spec_y = self.contract_specs[base_symbol_y]
-            spec_x = self.contract_specs[base_symbol_x]
-            
-            # 获取价格
-            price_y = current_prices.get(symbol_y)
-            price_x = current_prices.get(symbol_x)
-            
-            if price_y is None or price_x is None:
-                return None
-            
-            # 使用信号中的手数
-            contracts_y = signal['contracts_y']
-            contracts_x = signal['contracts_x']
-            
-            # 计算保证金
-            margin_per_y = price_y * spec_y['multiplier'] * self.margin_rate
-            margin_per_x = price_x * spec_x['multiplier'] * self.margin_rate
-            margin_required = contracts_y * margin_per_y + contracts_x * margin_per_x
-            
+        if beta <= 0:
+            logger.warning(f"β值异常: {beta}, 使用1:1")
             return {
-                'symbol_y': symbol_y,
-                'symbol_x': symbol_x,
-                'contracts_y': contracts_y,
-                'contracts_x': contracts_x,
-                'margin_per_y': margin_per_y,
-                'margin_per_x': margin_per_x,
-                'margin_required': margin_required,
-                'tick_size_y': spec_y['tick_size'],
-                'tick_size_x': spec_x['tick_size'],
-                'multiplier_y': spec_y['multiplier'],
-                'multiplier_x': spec_x['multiplier']
+                'lots_y': self.config.min_lots,
+                'lots_x': self.config.min_lots,
+                'theoretical_ratio': abs(beta),
+                'actual_ratio': 1.0,
+                'error': abs(1.0 - abs(beta))
             }
-        except Exception as e:
-            logger.error(f"准备手数信息失败: {e}")
-            return None
+        
+        # 使用Fraction找最简分数
+        # Y:X = 1:β
+        frac = Fraction(beta).limit_denominator(self.config.max_denominator)
+        
+        lots_y = frac.denominator
+        lots_x = frac.numerator
+        
+        # 确保满足最小手数要求
+        if lots_y < self.config.min_lots:
+            scale = self.config.min_lots / lots_y
+            lots_y = self.config.min_lots
+            lots_x = max(self.config.min_lots, int(lots_x * scale))
+        
+        if lots_x < self.config.min_lots:
+            if lots_x == 0:
+                lots_x = self.config.min_lots
+                lots_y = max(self.config.min_lots, lots_y)
+            else:
+                scale = self.config.min_lots / lots_x
+                lots_x = self.config.min_lots
+                lots_y = max(self.config.min_lots, int(lots_y * scale))
+        
+        # 限制最大手数
+        if lots_x > self.config.max_lots_per_leg:
+            scale = self.config.max_lots_per_leg / lots_x
+            lots_x = self.config.max_lots_per_leg
+            lots_y = max(self.config.min_lots, int(lots_y * scale))
+        
+        if lots_y > self.config.max_lots_per_leg:
+            scale = self.config.max_lots_per_leg / lots_y
+            lots_y = self.config.max_lots_per_leg
+            lots_x = max(self.config.min_lots, int(lots_x * scale))
+        
+        actual_ratio = lots_x / lots_y if lots_y > 0 else 0
+        error = abs(actual_ratio - beta) / beta if beta != 0 else 0
+        
+        return {
+            'lots_y': int(lots_y),
+            'lots_x': int(lots_x),
+            'theoretical_ratio': beta,
+            'actual_ratio': actual_ratio,
+            'error': error
+        }
     
     def apply_slippage(self, price: float, side: str, tick_size: float) -> float:
         """
-        应用滑点
+        应用滑点（REQ-4.1.4）
         
         Args:
             price: 市场价格
             side: 'buy' 或 'sell'
             tick_size: 最小变动价位
-            
-        Returns:
-            含滑点的实际成交价
         """
-        slippage = tick_size * self.slippage_ticks
+        slippage = tick_size * self.config.slippage_ticks
         
         if side == 'buy':
-            return price + slippage  # 买入价格上滑
+            return price + slippage
         else:  # sell
-            return price - slippage  # 卖出价格下滑
-            
-    def calculate_lots(self, signal: Dict, position_weight: float, 
-                      current_prices: Dict[str, float]) -> Optional[Dict]:
+            return price - slippage
+    
+    def process_signal(self, signal: Dict, current_prices: Dict[str, float]) -> bool:
         """
-        计算最优手数
+        处理交易信号
         
         Args:
-            signal: 交易信号，包含theoretical_ratio
-            position_weight: 仓位权重
-            current_prices: 当前价格
+            signal: 来自信号生成模块的信号（13个字段）
+            current_prices: 当前价格字典
             
         Returns:
-            手数分配结果或None
+            是否成功处理
         """
-        try:
-            pair = signal['pair']
+        pair = signal['pair']
+        signal_type = signal['signal']
+        z_score = signal.get('z_score', 0)
+        
+        # 跳过非交易信号
+        if signal_type in ['converging', 'hold']:
+            return True
+        
+        # 处理平仓信号
+        if signal_type == 'close' or abs(z_score) < self.config.z_close_threshold:
+            if pair in self.positions:
+                return self._close_position(pair, current_prices, 'signal', signal['date'])
+            return True
+        
+        # 处理开仓信号
+        if signal_type in ['open_long', 'open_short']:
+            # 检查Z-score阈值
+            if abs(z_score) < self.config.z_open_threshold:
+                logger.debug(f"Z-score {z_score:.2f} 未达到开仓阈值")
+                return False
             
-            # 优先使用信号中提供的symbol_x和symbol_y
-            if 'symbol_x' in signal and 'symbol_y' in signal:
-                symbol_x = signal['symbol_x']
-                symbol_y = signal['symbol_y']
-            else:
-                # 兼容旧代码：按照'X-Y'格式解析
-                symbol_x, symbol_y = pair.split('-')
+            # 检查是否已有持仓
+            if pair in self.positions and not self.config.allow_multiple_positions:
+                logger.debug(f"{pair} 已有持仓，跳过")
+                return False
             
-            # 获取基础符号（用于合约规格查询）
-            base_symbol_x = symbol_x.replace('_close', '') if '_close' in symbol_x else symbol_x
-            base_symbol_y = symbol_y.replace('_close', '') if '_close' in symbol_y else symbol_y
-            
-            # 获取合约规格
-            if base_symbol_y not in self.contract_specs or base_symbol_x not in self.contract_specs:
-                logger.warning(f"缺少合约规格: {pair} -> {base_symbol_x}-{base_symbol_y}")
-                return None
-                
-            spec_y = self.contract_specs[base_symbol_y]
-            spec_x = self.contract_specs[base_symbol_x]
-            
-            # 获取价格（使用完整符号名）
-            price_y = current_prices.get(symbol_y)
-            price_x = current_prices.get(symbol_x)
-            
-            if price_y is None or price_x is None:
-                logger.warning(f"价格数据缺失: {pair}")
-                return None
-                
-            # 计算该配对的预算
-            position_budget = self.position_manager.total_equity * position_weight
-            
-            # 获取理论比率
-            theoretical_ratio = abs(signal.get('theoretical_ratio', 1.0))
-            
-            # 计算单手保证金
-            margin_per_y = price_y * spec_y['multiplier'] * self.margin_rate
-            margin_per_x = price_x * spec_x['multiplier'] * self.margin_rate
-            
-            # 搜索最优整数手数组合
-            best_lots = self._search_optimal_lots(
-                theoretical_ratio, position_budget, margin_per_y, margin_per_x
-            )
-            
-            if best_lots is None:
-                return None
-                
-            # 计算总保证金需求
-            total_margin = (best_lots['contracts_y'] * margin_per_y + 
-                          best_lots['contracts_x'] * margin_per_x)
-                          
-            return {
-                'symbol_y': symbol_y,
-                'symbol_x': symbol_x,
-                'contracts_y': best_lots['contracts_y'],
-                'contracts_x': best_lots['contracts_x'],
-                'margin_required': total_margin,
-                'multiplier_y': spec_y['multiplier'],
-                'multiplier_x': spec_x['multiplier'],
-                'tick_size_y': spec_y['tick_size'],
-                'tick_size_x': spec_x['tick_size']
-            }
-            
-        except Exception as e:
-            logger.error(f"手数计算失败 {signal.get('pair', 'unknown')}: {e}")
-            return None
-            
-    def _search_optimal_lots(self, theoretical_ratio: float, budget: float,
-                           margin_per_y: float, margin_per_x: float) -> Optional[Dict]:
+            return self._open_position(signal, current_prices)
+        
+        return False
+    
+    def _open_position(self, signal: Dict, current_prices: Dict[str, float]) -> bool:
         """
-        搜索最优整数手数组合 - 使用多种算法验证
-        
-        实现3种算法：
-        1. 网格搜索法 (Grid Search)
-        2. 比率约简法 (Ratio Reduction)  
-        3. 线性规划近似法 (LP Approximation)
-        
-        返回3种算法中最优的结果
-        """
-        # 算法1: 网格搜索法
-        result1 = self._grid_search_lots(theoretical_ratio, budget, margin_per_y, margin_per_x)
-        
-        # 算法2: 比率约简法
-        result2 = self._ratio_reduction_lots(theoretical_ratio, budget, margin_per_y, margin_per_x)
-        
-        # 算法3: 线性规划近似法
-        result3 = self._lp_approximation_lots(theoretical_ratio, budget, margin_per_y, margin_per_x)
-        
-        # 选择最优结果（优先利用率，其次比率精度）
-        candidates = [r for r in [result1, result2, result3] if r is not None]
-        
-        if not candidates:
-            return None
-            
-        # 按利用率降序，比率误差升序排序
-        best = max(candidates, key=lambda x: (x['utilization'], -x['ratio_error']))
-        
-        logger.debug(f"手数计算结果: 网格搜索={'✓' if result1 else '✗'}, "
-                    f"比率约简={'✓' if result2 else '✗'}, "
-                    f"线性规划={'✓' if result3 else '✗'}, "
-                    f"最优=Y:{best['contracts_y']}, X:{best['contracts_x']}")
-                    
-        return best
-        
-    def _grid_search_lots(self, theoretical_ratio: float, budget: float,
-                         margin_per_y: float, margin_per_x: float) -> Optional[Dict]:
-        """
-        算法1: 网格搜索法
-        
-        穷举搜索所有可能的手数组合
-        """
-        best_lots = None
-        best_utilization = 0.0
-        
-        # 搜索范围：基于预算估算
-        max_y = min(100, int(budget / margin_per_y) + 1)
-        max_x = min(100, int(budget / margin_per_x) + 1)
-        
-        for contracts_y in range(1, max_y + 1):
-            for contracts_x in range(1, max_x + 1):
-                # 计算保证金需求
-                total_margin = contracts_y * margin_per_y + contracts_x * margin_per_x
-                
-                # 检查预算约束
-                if total_margin > budget:
-                    continue
-                    
-                # 计算实际比率与理论比率的偏差
-                actual_ratio = contracts_y / contracts_x
-                ratio_error = abs(actual_ratio - theoretical_ratio) / theoretical_ratio
-                
-                # 计算资金利用率
-                utilization = total_margin / budget
-                
-                # 选择标准：比率偏差<20% 且资金利用率最高
-                if ratio_error < 0.20 and utilization > best_utilization:
-                    best_utilization = utilization
-                    best_lots = {
-                        'contracts_y': contracts_y,
-                        'contracts_x': contracts_x,
-                        'total_margin': total_margin,
-                        'actual_ratio': actual_ratio,
-                        'ratio_error': ratio_error,
-                        'utilization': utilization,
-                        'algorithm': 'grid_search'
-                    }
-                    
-        return best_lots
-        
-    def _ratio_reduction_lots(self, theoretical_ratio: float, budget: float,
-                            margin_per_y: float, margin_per_x: float) -> Optional[Dict]:
-        """
-        算法2: 比率约简法
-        
-        基于理论比率的分数约简，寻找最简分数形式，然后按预算缩放
-        """
-        try:
-            # 将理论比率转换为分数形式
-            # 使用连分数展开找到最佳有理逼近
-            from fractions import Fraction
-            
-            # 限制分母大小避免过大的手数
-            max_denominator = 50
-            frac = Fraction(theoretical_ratio).limit_denominator(max_denominator)
-            
-            base_y = frac.numerator
-            base_x = frac.denominator
-            
-            # 计算基础组合的保证金
-            base_margin = base_y * margin_per_y + base_x * margin_per_x
-            
-            if base_margin > budget:
-                # 基础组合已超预算，尝试更小的约简
-                for denom in range(2, 20):
-                    frac2 = Fraction(theoretical_ratio).limit_denominator(denom)
-                    test_y, test_x = frac2.numerator, frac2.denominator
-                    test_margin = test_y * margin_per_y + test_x * margin_per_x
-                    
-                    if test_margin <= budget:
-                        base_y, base_x, base_margin = test_y, test_x, test_margin
-                        break
-                else:
-                    return None
-                    
-            # 按预算缩放到最大可能倍数
-            scale_factor = int(budget / base_margin)
-            
-            if scale_factor < 1:
-                return None
-                
-            contracts_y = base_y * scale_factor
-            contracts_x = base_x * scale_factor
-            total_margin = contracts_y * margin_per_y + contracts_x * margin_per_x
-            
-            # 验证约束
-            if total_margin > budget:
-                return None
-                
-            actual_ratio = contracts_y / contracts_x
-            ratio_error = abs(actual_ratio - theoretical_ratio) / theoretical_ratio
-            utilization = total_margin / budget
-            
-            return {
-                'contracts_y': contracts_y,
-                'contracts_x': contracts_x,
-                'total_margin': total_margin,
-                'actual_ratio': actual_ratio,
-                'ratio_error': ratio_error,
-                'utilization': utilization,
-                'algorithm': 'ratio_reduction',
-                'base_fraction': f"{base_y}/{base_x}",
-                'scale_factor': scale_factor
-            }
-            
-        except Exception as e:
-            logger.debug(f"比率约简法失败: {e}")
-            return None
-            
-    def _lp_approximation_lots(self, theoretical_ratio: float, budget: float,
-                             margin_per_y: float, margin_per_x: float) -> Optional[Dict]:
-        """
-        算法3: 线性规划近似法
-        
-        将问题建模为线性规划，然后取整数解
-        """
-        try:
-            # LP松弛解：最大化资金利用率
-            # 目标函数: max(y * margin_y + x * margin_x)
-            # 约束条件: y * margin_y + x * margin_x <= budget
-            #          y/x ≈ theoretical_ratio (软约束)
-            
-            # 假设x=1，计算对应的y
-            y_float = theoretical_ratio
-            
-            # 计算单位资金的最优分配
-            total_weight = y_float * margin_per_y + 1.0 * margin_per_x
-            allocation_ratio = budget / total_weight
-            
-            # 计算浮点解
-            y_lp = y_float * allocation_ratio
-            x_lp = 1.0 * allocation_ratio
-            
-            # 尝试多种取整策略
-            candidates = []
-            
-            # 策略1: 直接四舍五入
-            y1, x1 = round(y_lp), round(x_lp)
-            if y1 >= 1 and x1 >= 1:
-                candidates.append((y1, x1))
-                
-            # 策略2: 向下取整
-            y2, x2 = int(y_lp), int(x_lp)
-            if y2 >= 1 and x2 >= 1:
-                candidates.append((y2, x2))
-                
-            # 策略3: Y向上，X向下
-            y3, x3 = int(y_lp) + 1, int(x_lp)
-            if y3 >= 1 and x3 >= 1:
-                candidates.append((y3, x3))
-                
-            # 策略4: Y向下，X向上  
-            y4, x4 = int(y_lp), int(x_lp) + 1
-            if y4 >= 1 and x4 >= 1:
-                candidates.append((y4, x4))
-                
-            # 选择最优的取整结果
-            best_candidate = None
-            best_score = -1
-            
-            for y_int, x_int in candidates:
-                total_margin = y_int * margin_per_y + x_int * margin_per_x
-                
-                if total_margin > budget:
-                    continue
-                    
-                actual_ratio = y_int / x_int
-                ratio_error = abs(actual_ratio - theoretical_ratio) / theoretical_ratio
-                utilization = total_margin / budget
-                
-                # 综合评分：利用率权重0.7，比率精度权重0.3
-                score = 0.7 * utilization - 0.3 * ratio_error
-                
-                if ratio_error < 0.20 and score > best_score:
-                    best_score = score
-                    best_candidate = {
-                        'contracts_y': y_int,
-                        'contracts_x': x_int,
-                        'total_margin': total_margin,
-                        'actual_ratio': actual_ratio,
-                        'ratio_error': ratio_error,
-                        'utilization': utilization,
-                        'algorithm': 'lp_approximation',
-                        'lp_solution': f"({y_lp:.2f}, {x_lp:.2f})"
-                    }
-                    
-            return best_candidate
-            
-        except Exception as e:
-            logger.debug(f"线性规划近似法失败: {e}")
-            return None
-        
-    def execute_signal(self, signal: Dict, current_prices: Dict[str, float], current_date: datetime = None) -> bool:
-        """
-        执行交易信号
+        开仓操作
         
         Args:
             signal: 交易信号
             current_prices: 当前价格
-            
-        Returns:
-            是否成功执行
         """
         pair = signal['pair']
-        signal_type = signal['signal']
+        symbol_x = signal['symbol_x']
+        symbol_y = signal['symbol_y']
+        beta = abs(signal['beta'])  # 使用动态β值
         
-        if signal_type in ['long_spread', 'short_spread'] or signal_type.startswith('open'):
-            return self._open_position(signal, current_prices)
-        elif signal_type == 'close':
-            close_z_score = signal.get('z_score', np.nan)
-            return self._close_position(pair, current_prices, 'signal', current_date, close_z_score)
-        else:
-            logger.warning(f"未知信号类型: {signal_type}")
+        # 检查合约规格
+        if symbol_x not in self.contract_specs or symbol_y not in self.contract_specs:
+            logger.warning(f"缺少合约规格: {symbol_x} 或 {symbol_y}")
             return False
-            
-    def _open_position(self, signal: Dict, current_prices: Dict[str, float]) -> bool:
-        """开仓操作"""
-        pair = signal['pair']
         
-        # 检查是否已有持仓
-        if pair in self.position_manager.positions:
-            logger.debug(f"配对 {pair} 已有持仓，跳过开仓")
+        spec_x = self.contract_specs[symbol_x]
+        spec_y = self.contract_specs[symbol_y]
+        
+        # 计算手数
+        lots_result = self.calculate_min_lots(beta)
+        
+        # 获取价格
+        price_x = current_prices.get(symbol_x)
+        price_y = current_prices.get(symbol_y)
+        
+        if price_x is None or price_y is None:
+            logger.warning(f"缺少价格: {symbol_x}={price_x}, {symbol_y}={price_y}")
             return False
-            
-        # 获取权重
-        position_weight = self.position_weights.get(pair, 0.05)  # 默认5%
         
-        # 检查是否有外部指定的手数
-        if 'contracts_y' in signal and 'contracts_x' in signal:
-            # 使用外部指定的手数
-            lots_info = self._prepare_lots_info_from_signal(signal, current_prices)
-            if lots_info is None:
-                logger.warning(f"无法准备手数信息: {pair}")
-                return False
-        else:
-            # 计算手数
-            lots_info = self.calculate_lots(signal, position_weight, current_prices)
-            if lots_info is None:
-                logger.warning(f"无法计算手数: {pair}")
-                return False
-            
+        # 计算保证金
+        margin_x = price_x * lots_result['lots_x'] * spec_x['multiplier'] * self.config.margin_rate
+        margin_y = price_y * lots_result['lots_y'] * spec_y['multiplier'] * self.config.margin_rate
+        margin_required = margin_x + margin_y
+        
         # 检查资金
-        if not self.position_manager.can_open_position(lots_info['margin_required']):
-            logger.warning(f"资金不足，无法开仓: {pair}")
+        if self.available_capital < margin_required:
+            logger.warning(f"资金不足: 需要{margin_required:,.0f}, 可用{self.available_capital:,.0f}")
             return False
-            
-        # 获取方向和应用滑点
-        direction = 'long_spread' if 'long' in signal['signal'] else 'short_spread'
         
-        if direction == 'long_spread':
+        # 应用滑点
+        if signal['signal'] == 'open_long':
             # 做多价差：买Y卖X
-            
-            # 调试HC0-I0的价格获取
-            if pair == 'HC0-I0':
-                logger.info(f"HC0-I0调试 - lots_info: symbol_x={lots_info['symbol_x']}, symbol_y={lots_info['symbol_y']}")
-                logger.info(f"HC0-I0调试 - current_prices keys: {list(current_prices.keys())}")
-                logger.info(f"HC0-I0调试 - 获取价格: X({lots_info['symbol_x']})={current_prices.get(lots_info['symbol_x'])}, Y({lots_info['symbol_y']})={current_prices.get(lots_info['symbol_y'])}")
-            
-            open_price_y = self.apply_slippage(
-                current_prices[lots_info['symbol_y']], 'buy', lots_info['tick_size_y']
-            )
-            open_price_x = self.apply_slippage(
-                current_prices[lots_info['symbol_x']], 'sell', lots_info['tick_size_x']
-            )
-            
-            # 再次调试，确认价格没有被交换
-            if pair == 'HC0-I0':
-                logger.info(f"HC0-I0调试 - 应用滑点后: open_price_x={open_price_x}, open_price_y={open_price_y}")
-        else:
+            open_price_y = self.apply_slippage(price_y, 'buy', spec_y['tick_size'])
+            open_price_x = self.apply_slippage(price_x, 'sell', spec_x['tick_size'])
+        else:  # open_short
             # 做空价差：卖Y买X
-            open_price_y = self.apply_slippage(
-                current_prices[lots_info['symbol_y']], 'sell', lots_info['tick_size_y']
-            )
-            open_price_x = self.apply_slippage(
-                current_prices[lots_info['symbol_x']], 'buy', lots_info['tick_size_x']
-            )
-            
-        # 计算开仓手续费
-        nominal_y = open_price_y * lots_info['contracts_y'] * lots_info['multiplier_y']
-        nominal_x = open_price_x * lots_info['contracts_x'] * lots_info['multiplier_x']
-        open_commission = (nominal_y + nominal_x) * self.commission_rate
+            open_price_y = self.apply_slippage(price_y, 'sell', spec_y['tick_size'])
+            open_price_x = self.apply_slippage(price_x, 'buy', spec_x['tick_size'])
         
-        # 创建持仓记录
-        try:
-            logger.debug(f"创建持仓: {pair}, 方向={direction}")
-            logger.debug(f"lots_info: {lots_info}")
-            
-            # 调试HC0-I0的Position创建
-            if pair == 'HC0-I0':
-                logger.info(f"HC0-I0调试 - 创建Position: symbol_x={lots_info['symbol_x']}, symbol_y={lots_info['symbol_y']}")
-                logger.info(f"HC0-I0调试 - 创建Position: open_price_x={open_price_x}, open_price_y={open_price_y}")
-            
-            position = Position(
-                pair=pair,
-                direction=direction,
-                spread_formula=signal.get('spread_formula', ''),
-                open_date=pd.to_datetime(signal['date']),
-                position_weight=position_weight,
-                symbol_y=lots_info['symbol_y'],
-                symbol_x=lots_info['symbol_x'],
-                contracts_y=lots_info['contracts_y'],
-                contracts_x=lots_info['contracts_x'],
-                beta=abs(signal.get('theoretical_ratio', signal.get('beta', 1.0))),  # Kalman beta
-                ols_beta=signal.get('ols_beta', np.nan),  # OLS beta
-                open_z_score=signal.get('z_score', 0.0),  # 开仓时的Z-score
-                open_price_y=open_price_y,
-                open_price_x=open_price_x,
-                margin_occupied=lots_info['margin_required'],
-                open_commission=open_commission,
-                prev_price_y=open_price_y,  # 初始化前日价格
-                prev_price_x=open_price_x,
-                multiplier_y=lots_info['multiplier_y'],
-                multiplier_x=lots_info['multiplier_x']
-            )
-            logger.debug(f"持仓创建成功: {position}")
-        except Exception as e:
-            logger.error(f"持仓创建失败: {e}")
-            return False
+        # 计算手续费
+        nominal_x = open_price_x * lots_result['lots_x'] * spec_x['multiplier']
+        nominal_y = open_price_y * lots_result['lots_y'] * spec_y['multiplier']
+        open_commission = (nominal_x + nominal_y) * self.config.commission_rate
         
-        # 扣除手续费
-        self.position_manager.available_capital -= open_commission
-        
-        # 添加持仓
-        self.position_manager.add_position(position)
-        
-        logger.info(f"开仓成功: {pair} {direction}, 手数=Y:{lots_info['contracts_y']} X:{lots_info['contracts_x']}")
-        
-        return True
-        
-    def _close_position(self, pair: str, current_prices: Dict[str, float], 
-                       reason: str, current_date: datetime = None, 
-                       close_z_score: float = np.nan) -> bool:
-        """平仓操作"""
-        position = self.position_manager.remove_position(pair)
-        if position is None:
-            logger.warning(f"未找到持仓: {pair}")
-            return False
-            
-        try:
-            # 获取基础符号用于合约规格查询
-            base_symbol_y = position.symbol_y.replace('_close', '') if '_close' in position.symbol_y else position.symbol_y
-            base_symbol_x = position.symbol_x.replace('_close', '') if '_close' in position.symbol_x else position.symbol_x
-            
-            # 获取平仓价格并应用滑点
-            if position.direction == 'long_spread':
-                # 平多头价差：卖Y买X
-                close_price_y = self.apply_slippage(
-                    current_prices[position.symbol_y], 'sell', 
-                    self.contract_specs[base_symbol_y]['tick_size']
-                )
-                close_price_x = self.apply_slippage(
-                    current_prices[position.symbol_x], 'buy',
-                    self.contract_specs[base_symbol_x]['tick_size'] 
-                )
-            else:
-                # 平空头价差：买Y卖X
-                close_price_y = self.apply_slippage(
-                    current_prices[position.symbol_y], 'buy',
-                    self.contract_specs[base_symbol_y]['tick_size']
-                )
-                close_price_x = self.apply_slippage(
-                    current_prices[position.symbol_x], 'sell',
-                    self.contract_specs[base_symbol_x]['tick_size']
-                )
-                
-            # 计算毛PnL - 使用双算法验证
-            gross_pnl_1, y_pnl_1, x_pnl_1 = self._calculate_pnl_method1(
-                position, close_price_y, close_price_x
-            )
-            
-            gross_pnl_2, y_pnl_2, x_pnl_2 = self._calculate_pnl_method2(
-                position, close_price_y, close_price_x
-            )
-            
-            # 验证两种算法结果一致性
-            pnl_diff = abs(gross_pnl_1 - gross_pnl_2)
-            if pnl_diff > 0.01:  # 允许1分钱误差
-                logger.warning(f"PnL计算不一致 {pair}: 方法1={gross_pnl_1:,.2f}, 方法2={gross_pnl_2:,.2f}, 差异={pnl_diff:,.2f}")
-                
-            # 使用第一种方法的结果
-            gross_pnl = gross_pnl_1
-            y_pnl, x_pnl = y_pnl_1, x_pnl_1
-            
-            # 计算平仓手续费 - 使用双算法验证
-            close_commission_1 = self._calculate_commission_method1(
-                close_price_y, close_price_x, position
-            )
-            
-            close_commission_2 = self._calculate_commission_method2(
-                close_price_y, close_price_x, position
-            )
-            
-            # 验证手续费计算一致性
-            comm_diff = abs(close_commission_1 - close_commission_2)
-            if comm_diff > 0.01:
-                logger.warning(f"手续费计算不一致 {pair}: 方法1={close_commission_1:,.2f}, 方法2={close_commission_2:,.2f}")
-                
-            close_commission = close_commission_1
-            
-            # 计算净PnL
-            net_pnl = gross_pnl - position.open_commission - close_commission
-            
-            # 更新可用资金
-            self.position_manager.available_capital += net_pnl - close_commission
-            
-            # 记录交易
-            close_date = pd.to_datetime(current_date) if current_date else pd.Timestamp.now()
-            holding_days = (close_date - position.open_date).days
-            
-            trade_record = {
-                'trade_id': self.trade_id_counter,
-                'pair': pair,
-                'direction': position.direction,
-                'beta_kalman': position.beta,  # Kalman beta
-                'beta_ols': position.ols_beta,  # OLS beta
-                'open_z_score': position.open_z_score,  # 开仓Z-score
-                'close_z_score': close_z_score,  # 平仓Z-score
-                'spread_formula': position.spread_formula,
-                'open_date': position.open_date.strftime('%Y-%m-%d'),
-                'close_date': close_date.strftime('%Y-%m-%d'),
-                'holding_days': holding_days,
-                'position_weight': position.position_weight,
-                'contracts_y': position.contracts_y,
-                'contracts_x': position.contracts_x,
-                'open_price_y': position.open_price_y,
-                'open_price_x': position.open_price_x,
-                'close_price_y': close_price_y,
-                'close_price_x': close_price_x,
-                'margin_occupied': position.margin_occupied,
-                'gross_pnl': gross_pnl,
-                'open_commission': position.open_commission,
-                'close_commission': close_commission,
-                'net_pnl': net_pnl,
-                'close_reason': reason,
-                'return_on_margin': net_pnl / position.margin_occupied if position.margin_occupied > 0 else 0.0
-            }
-            
-            self.trade_records.append(trade_record)
-            self.trade_id_counter += 1
-            
-            logger.info(f"平仓成功: {pair}, 净PnL={net_pnl:+,.0f}, 原因={reason}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"平仓失败 {pair}: {e}")
-            # 如果平仓失败，需要重新添加持仓
-            self.position_manager.add_position(position)
-            return False
-            
-    def calculate_metrics(self) -> Dict[str, Any]:
-        """计算绩效指标"""
-        if not self.trade_records:
-            return {}
-            
-        df = pd.DataFrame(self.trade_records)
-        
-        # 基本统计
-        total_trades = len(df)
-        winning_trades = len(df[df['net_pnl'] > 0])
-        losing_trades = len(df[df['net_pnl'] < 0])
-        
-        total_pnl = df['net_pnl'].sum()
-        total_return = total_pnl / self.initial_capital
-        
-        # 胜率和盈亏比
-        win_rate = winning_trades / total_trades if total_trades > 0 else 0
-        avg_win = df[df['net_pnl'] > 0]['net_pnl'].mean() if winning_trades > 0 else 0
-        avg_loss = df[df['net_pnl'] < 0]['net_pnl'].mean() if losing_trades > 0 else 0
-        profit_loss_ratio = avg_win / abs(avg_loss) if avg_loss < 0 else 0
-        
-        # 时间相关指标
-        if len(self.equity_curve) > 1:
-            returns = np.diff(self.equity_curve) / self.equity_curve[:-1]
-            sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0
-            
-            # 最大回撤
-            equity = np.array(self.equity_curve)
-            running_max = np.maximum.accumulate(equity)
-            drawdown = (equity - running_max) / running_max
-            max_drawdown = np.min(drawdown)
-        else:
-            sharpe_ratio = 0
-            max_drawdown = 0
-        
-        # 年化收益率计算
-        if total_trades > 0:
-            first_trade_date = pd.to_datetime(df['open_date'].min())
-            last_trade_date = pd.to_datetime(df['close_date'].max())
-            trading_days = (last_trade_date - first_trade_date).days
-            if trading_days > 0:
-                annual_return = (1 + total_return) ** (252 / trading_days) - 1
-            else:
-                annual_return = 0
-        else:
-            annual_return = 0
-            
-        return {
-            'total_trades': total_trades,
-            'winning_trades': winning_trades,
-            'losing_trades': losing_trades,
-            'win_rate': win_rate * 100,  # 转换为百分比
-            'total_pnl': total_pnl,
-            'total_return': total_return * 100,  # 转换为百分比
-            'annual_return': annual_return * 100,  # 转换为百分比
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
-            'profit_loss_ratio': profit_loss_ratio,
-            'sharpe_ratio': sharpe_ratio,
-            'max_drawdown': max_drawdown * 100,  # 转换为百分比
-            'avg_holding_days': df['holding_days'].mean(),
-            'total_commission': df['open_commission'].sum() + df['close_commission'].sum(),
-            'trade_records': self.trade_records  # 返回交易记录供分析
-        }
-    
-    # ========== PnL计算双算法验证方法 ==========
-    
-    def _calculate_pnl_method1(self, position: Position, close_price_y: float, 
-                              close_price_x: float) -> Tuple[float, float, float]:
-        """
-        PnL计算方法1：基于价差方向的标准算法
-        
-        多头价差 (long_spread): 买Y卖X，预期价差上涨
-        - Y腿PnL = (平仓价 - 开仓价) × 手数 × 乘数 (做多)
-        - X腿PnL = (开仓价 - 平仓价) × 手数 × 乘数 (做空)
-        
-        空头价差 (short_spread): 卖Y买X，预期价差下跌  
-        - Y腿PnL = (开仓价 - 平仓价) × 手数 × 乘数 (做空)
-        - X腿PnL = (平仓价 - 开仓价) × 手数 × 乘数 (做多)
-        """
-        if position.direction == 'long_spread':
-            # 做多价差：多Y空X
-            y_pnl = (close_price_y - position.open_price_y) * position.contracts_y * position.multiplier_y
-            x_pnl = (position.open_price_x - close_price_x) * position.contracts_x * position.multiplier_x
-        else:
-            # 做空价差：空Y多X
-            y_pnl = (position.open_price_y - close_price_y) * position.contracts_y * position.multiplier_y
-            x_pnl = (close_price_x - position.open_price_x) * position.contracts_x * position.multiplier_x
-            
-        gross_pnl = y_pnl + x_pnl
-        return gross_pnl, y_pnl, x_pnl
-    
-    def _calculate_pnl_method2(self, position: Position, close_price_y: float,
-                              close_price_x: float) -> Tuple[float, float, float]:
-        """
-        PnL计算方法2：基于名义价值变化的验证算法
-        
-        通过计算开仓和平仓时的名义价值变化来验证PnL
-        """
-        # 开仓时的名义价值
-        open_nominal_y = position.open_price_y * position.contracts_y * position.multiplier_y
-        open_nominal_x = position.open_price_x * position.contracts_x * position.multiplier_x
-        
-        # 平仓时的名义价值
-        close_nominal_y = close_price_y * position.contracts_y * position.multiplier_y
-        close_nominal_x = close_price_x * position.contracts_x * position.multiplier_x
-        
-        # 根据方向计算PnL
-        if position.direction == 'long_spread':
-            # 多头价差：持有Y合约，做空X合约
-            y_pnl = close_nominal_y - open_nominal_y  # 多头：价值增加为盈利
-            x_pnl = open_nominal_x - close_nominal_x  # 空头：价值下降为盈利
-        else:
-            # 空头价差：做空Y合约，持有X合约
-            y_pnl = open_nominal_y - close_nominal_y  # 空头：价值下降为盈利
-            x_pnl = close_nominal_x - open_nominal_x  # 多头：价值增加为盈利
-            
-        gross_pnl = y_pnl + x_pnl
-        return gross_pnl, y_pnl, x_pnl
-    
-    def _calculate_commission_method1(self, close_price_y: float, close_price_x: float,
-                                     position: Position) -> float:
-        """
-        手续费计算方法1：基于名义价值的标准算法
-        """
-        nominal_y = close_price_y * position.contracts_y * position.multiplier_y
-        nominal_x = close_price_x * position.contracts_x * position.multiplier_x
-        return (nominal_y + nominal_x) * self.commission_rate
-    
-    def _calculate_commission_method2(self, close_price_y: float, close_price_x: float,
-                                     position: Position) -> float:
-        """
-        手续费计算方法2：分别计算每腿手续费的验证算法
-        """
-        commission_y = close_price_y * position.contracts_y * position.multiplier_y * self.commission_rate
-        commission_x = close_price_x * position.contracts_x * position.multiplier_x * self.commission_rate
-        return commission_y + commission_x
-    
-    def _verify_direction_calculation(self, position: Position) -> bool:
-        """
-        验证方向计算的正确性
-        
-        检查价差公式与方向的一致性：
-        - spread = log(Y) - β*log(X) - c
-        - long_spread: 预期spread上涨，做多Y做空X
-        - short_spread: 预期spread下跌，做空Y做多X
-        """
-        try:
-            # 从价差公式中提取方向信息
-            formula = position.spread_formula.lower()
-            
-            # 检查公式格式
-            if 'log(' not in formula:
-                return True  # 无法验证，认为正确
-                
-            # 解析公式中的系数符号
-            if position.direction == 'long_spread':
-                # 多头价差：期望Y相对X上涨，应该买Y卖X
-                expected_behavior = "buy_y_sell_x"
-            else:
-                # 空头价差：期望Y相对X下跌，应该卖Y买X  
-                expected_behavior = "sell_y_buy_x"
-                
-            logger.debug(f"方向验证 {position.pair}: {position.direction} -> {expected_behavior}")
-            return True
-            
-        except Exception as e:
-            logger.warning(f"方向验证失败 {position.pair}: {e}")
-            return True
-    
-    def _verify_multiplier_calculation(self, symbol: str, expected_multiplier: float) -> bool:
-        """
-        验证合约乘数计算的正确性
-        
-        双重验证合约乘数是否与规格文件一致
-        """
-        try:
-            # 方法1：从合约规格直接获取
-            spec_multiplier = self.contract_specs.get(symbol, {}).get('multiplier', 1.0)
-            
-            # 方法2：基于常见期货合约的标准乘数验证
-            standard_multipliers = {
-                'CU': 5,     # 沪铜
-                'AL': 5,     # 沪铝  
-                'ZN': 5,     # 沪锌
-                'NI': 1,     # 沪镍
-                'SN': 1,     # 沪锡
-                'PB': 5,     # 沪铅
-                'AG': 15,    # 沪银
-                'AU': 1000,  # 沪金
-                'RB': 10,    # 螺纹钢
-                'HC': 10,    # 热轧卷板
-                'I': 100,    # 铁矿石
-                'SF': 5,     # 硅铁
-                'SM': 5,     # 锰硅
-                'SS': 5      # 不锈钢
-            }
-            
-            # 提取品种代码（去掉数字和0）
-            base_symbol = ''.join([c for c in symbol if c.isalpha()])
-            standard_multiplier = standard_multipliers.get(base_symbol, spec_multiplier)
-            
-            # 验证一致性
-            if abs(spec_multiplier - expected_multiplier) < 0.01:
-                multiplier_ok_1 = True
-            else:
-                multiplier_ok_1 = False
-                logger.warning(f"合约乘数不一致 {symbol}: 规格={spec_multiplier}, 实际={expected_multiplier}")
-                
-            if abs(standard_multiplier - expected_multiplier) < 0.01:
-                multiplier_ok_2 = True
-            else:
-                multiplier_ok_2 = False
-                logger.debug(f"标准乘数检查 {symbol}: 标准={standard_multiplier}, 实际={expected_multiplier}")
-                
-            return multiplier_ok_1 or multiplier_ok_2
-            
-        except Exception as e:
-            logger.warning(f"乘数验证失败 {symbol}: {e}")
-            return True
-    
-    def _verify_price_calculation(self, base_price: float, side: str, 
-                                 tick_size: float, slippage_ticks: int,
-                                 actual_price: float) -> bool:
-        """
-        验证价格滑点计算的正确性
-        
-        双算法验证滑点应用是否正确
-        """
-        try:
-            # 方法1：直接计算
-            expected_price_1 = self.apply_slippage(base_price, side, tick_size)
-            
-            # 方法2：分步计算验证
-            slippage_amount = tick_size * slippage_ticks
-            if side == 'buy':
-                expected_price_2 = base_price + slippage_amount
-            else:
-                expected_price_2 = base_price - slippage_amount
-                
-            # 验证两种方法结果一致
-            method_diff = abs(expected_price_1 - expected_price_2)
-            if method_diff > 0.0001:
-                logger.warning(f"滑点计算方法不一致: 方法1={expected_price_1}, 方法2={expected_price_2}")
-                return False
-                
-            # 验证与实际价格的一致性
-            actual_diff = abs(expected_price_1 - actual_price)
-            if actual_diff > 0.0001:
-                logger.warning(f"价格滑点不一致: 预期={expected_price_1}, 实际={actual_price}")
-                return False
-                
-            return True
-            
-        except Exception as e:
-            logger.warning(f"价格验证失败: {e}")
-            return True
-    
-    # ========== 风险管理功能 ==========
-    
-    def check_stop_loss(self, position: Position, current_prices: Dict[str, float]) -> bool:
-        """
-        检查止损条件：单笔亏损达保证金10%触发平仓
-        
-        Args:
-            position: 持仓记录
-            current_prices: 当前价格
-            
-        Returns:
-            是否触发止损
-        """
-        try:
-            current_y = current_prices.get(position.symbol_y)
-            current_x = current_prices.get(position.symbol_x)
-            
-            if current_y is None or current_x is None:
-                return False
-                
-            # 计算当前未实现PnL
-            unrealized_pnl, _, _ = self._calculate_pnl_method1(position, current_y, current_x)
-            
-            # 止损阈值：保证金的负百分比
-            stop_loss_threshold = -position.margin_occupied * self.stop_loss_pct
-            
-            if unrealized_pnl <= stop_loss_threshold:
-                loss_pct = unrealized_pnl / position.margin_occupied * 100
-                logger.info(f"触发止损 {position.pair}: 当前PnL={unrealized_pnl:+,.0f}, "
-                          f"止损线={stop_loss_threshold:+,.0f}, 实际损失={loss_pct:.2f}%, "
-                          f"开仓Z={position.open_z_score:.3f}, 当前价格Y={current_y:.3f} X={current_x:.3f}")
-                return True
-                
-            return False
-            
-        except Exception as e:
-            logger.error(f"止损检查失败 {position.pair}: {e}")
-            return False
-    
-    def check_time_stop(self, position: Position, current_date: datetime) -> bool:
-        """
-        检查时间止损：持仓超过最大天数强制平仓
-        
-        Args:
-            position: 持仓记录
-            current_date: 当前日期
-            
-        Returns:
-            是否触发时间止损
-        """
-        try:
-            holding_days = (current_date - position.open_date).days
-            
-            if holding_days >= self.max_holding_days:
-                logger.info(f"触发时间止损 {position.pair}: 持仓{holding_days}天（最大{self.max_holding_days}天）")
-                return True
-                
-            return False
-            
-        except Exception as e:
-            logger.error(f"时间止损检查失败 {position.pair}: {e}")
-            return False
-    
-    def run_risk_management(self, current_date: datetime, current_prices: Dict[str, float]) -> List[str]:
-        """
-        运行风险管理检查，返回需要强制平仓的配对列表
-        
-        优先级：止损 > 时间止损 > 强制平仓
-        
-        Args:
-            current_date: 当前日期
-            current_prices: 当前价格
-            
-        Returns:
-            需要平仓的配对列表及原因
-        """
-        force_close_list = []
-        
-        for pair, position in list(self.position_manager.positions.items()):
-            close_reason = None
-            
-            # 1. 检查止损（优先级最高）
-            if self.check_stop_loss(position, current_prices):
-                close_reason = 'stop_loss'
-                
-            # 2. 检查时间止损
-            elif self.check_time_stop(position, current_date):
-                close_reason = 'time_stop'
-                
-            if close_reason:
-                force_close_list.append({
-                    'pair': pair,
-                    'reason': close_reason,
-                    'holding_days': (current_date - position.open_date).days
-                })
-                
-        # 3. 检查强制平仓（资金不足）
-        if self.position_manager.check_margin_call():
-            logger.warning("触发强制平仓：可用资金不足")
-            for pair in list(self.position_manager.positions.keys()):
-                if not any(item['pair'] == pair for item in force_close_list):
-                    force_close_list.append({
-                        'pair': pair,
-                        'reason': 'margin_call',
-                        'available_capital': self.position_manager.available_capital
-                    })
-                    
-        return force_close_list
-    
-    # ========== 配对分析功能 ==========
-    
-    def analyze_pairs_performance(self) -> pd.DataFrame:
-        """
-        配对收益分析
-        
-        Returns:
-            配对分析结果DataFrame
-        """
-        if not self.trade_records:
-            return pd.DataFrame()
-            
-        df = pd.DataFrame(self.trade_records)
-        
-        # 按配对分组分析
-        pair_analysis = df.groupby('pair').agg({
-            'net_pnl': ['sum', 'mean', 'std', 'count'],
-            'holding_days': 'mean',
-            'return_on_margin': ['mean', 'std'],
-            'open_commission': 'sum',
-            'close_commission': 'sum'
-        }).round(2)
-        
-        # 扁平化多级列名
-        pair_analysis.columns = [
-            'total_pnl', 'avg_pnl', 'pnl_std', 'trade_count',
-            'avg_holding_days', 'avg_return_on_margin', 'return_std',
-            'total_open_comm', 'total_close_comm'
-        ]
-        
-        # 计算胜率
-        pair_wins = df[df['net_pnl'] > 0].groupby('pair').size()
-        pair_analysis['win_rate'] = (pair_wins / pair_analysis['trade_count']).fillna(0)
-        
-        # 计算收益率贡献
-        total_pnl = df['net_pnl'].sum()
-        if total_pnl != 0:
-            pair_analysis['pnl_contribution'] = pair_analysis['total_pnl'] / total_pnl
-        else:
-            pair_analysis['pnl_contribution'] = 0
-            
-        # 按总收益排序
-        pair_analysis = pair_analysis.sort_values('total_pnl', ascending=False)
-        
-        return pair_analysis
-        
-    def get_top_pairs(self, n: int = 20) -> pd.DataFrame:
-        """
-        获取Top N配对
-        
-        Args:
-            n: 返回配对数量
-            
-        Returns:
-            Top N配对分析结果
-        """
-        pair_analysis = self.analyze_pairs_performance()
-        
-        if len(pair_analysis) == 0:
-            return pd.DataFrame()
-            
-        return pair_analysis.head(n)
-        
-    def calculate_pairs_correlation(self) -> pd.DataFrame:
-        """
-        计算配对间收益相关性
-        
-        Returns:
-            配对相关性矩阵
-        """
-        if not self.trade_records:
-            return pd.DataFrame()
-            
-        df = pd.DataFrame(self.trade_records)
-        
-        # 构建配对收益矩阵
-        pairs_pnl = df.pivot_table(
-            index='trade_id', 
-            columns='pair', 
-            values='net_pnl', 
-            fill_value=0
+        # 创建持仓
+        position = Position(
+            pair=pair,
+            symbol_x=symbol_x,
+            symbol_y=symbol_y,
+            direction=signal['signal'],
+            open_date=pd.to_datetime(signal['date']),
+            beta=beta,
+            lots_x=lots_result['lots_x'],
+            lots_y=lots_result['lots_y'],
+            theoretical_ratio=lots_result['theoretical_ratio'],
+            actual_ratio=lots_result['actual_ratio'],
+            open_price_x=open_price_x,
+            open_price_y=open_price_y,
+            margin_occupied=margin_required,
+            open_commission=open_commission,
+            multiplier_x=spec_x['multiplier'],
+            multiplier_y=spec_y['multiplier'],
+            tick_size_x=spec_x['tick_size'],
+            tick_size_y=spec_y['tick_size'],
+            z_score_open=signal.get('z_score', 0)
         )
         
-        # 计算相关系数
-        correlation_matrix = pairs_pnl.corr()
+        # 更新资金
+        self.available_capital -= (margin_required + open_commission)
+        self.occupied_margin += margin_required
         
-        return correlation_matrix
+        # 添加持仓
+        self.positions[pair] = position
         
-    def generate_performance_summary(self) -> Dict[str, Any]:
+        logger.info(f"开仓: {pair} {signal['signal']}")
+        logger.info(f"  β={beta:.4f}, 手数Y:{lots_result['lots_y']} X:{lots_result['lots_x']}")
+        logger.info(f"  保证金: {margin_required:,.0f}, 手续费: {open_commission:,.0f}")
+        
+        return True
+    
+    def _close_position(self, pair: str, current_prices: Dict[str, float], 
+                       reason: str, current_date: str) -> bool:
         """
-        生成完整绩效总结
+        平仓操作
+        
+        Args:
+            pair: 配对名称
+            current_prices: 当前价格
+            reason: 平仓原因
+            current_date: 当前日期
+        """
+        if pair not in self.positions:
+            logger.warning(f"未找到持仓: {pair}")
+            return False
+        
+        position = self.positions[pair]
+        
+        # 获取价格
+        price_x = current_prices.get(position.symbol_x)
+        price_y = current_prices.get(position.symbol_y)
+        
+        if price_x is None or price_y is None:
+            logger.warning(f"缺少平仓价格: {position.symbol_x}={price_x}, {position.symbol_y}={price_y}")
+            return False
+        
+        # 应用滑点
+        if position.direction == 'open_long':
+            # 平多头价差：卖Y买X
+            close_price_y = self.apply_slippage(price_y, 'sell', position.tick_size_y)
+            close_price_x = self.apply_slippage(price_x, 'buy', position.tick_size_x)
+        else:  # open_short
+            # 平空头价差：买Y卖X
+            close_price_y = self.apply_slippage(price_y, 'buy', position.tick_size_y)
+            close_price_x = self.apply_slippage(price_x, 'sell', position.tick_size_x)
+        
+        # 计算PnL
+        if position.direction == 'open_long':
+            y_pnl = (close_price_y - position.open_price_y) * position.lots_y * position.multiplier_y
+            x_pnl = (position.open_price_x - close_price_x) * position.lots_x * position.multiplier_x
+        else:  # open_short
+            y_pnl = (position.open_price_y - close_price_y) * position.lots_y * position.multiplier_y
+            x_pnl = (close_price_x - position.open_price_x) * position.lots_x * position.multiplier_x
+        
+        gross_pnl = y_pnl + x_pnl
+        
+        # 计算平仓手续费
+        nominal_x = close_price_x * position.lots_x * position.multiplier_x
+        nominal_y = close_price_y * position.lots_y * position.multiplier_y
+        close_commission = (nominal_x + nominal_y) * self.config.commission_rate
+        
+        # 净PnL
+        net_pnl = gross_pnl - position.open_commission - close_commission
+        
+        # 更新资金
+        self.available_capital += position.margin_occupied + net_pnl - close_commission
+        self.occupied_margin -= position.margin_occupied
+        
+        # 计算持仓天数
+        close_date = pd.to_datetime(current_date)
+        holding_days = (close_date - position.open_date).days
+        
+        # 记录交易
+        trade_record = {
+            'trade_id': self.trade_id,
+            'pair': pair,
+            'symbol_x': position.symbol_x,
+            'symbol_y': position.symbol_y,
+            'direction': position.direction,
+            'beta': position.beta,
+            'z_score_open': position.z_score_open,
+            'open_date': position.open_date.strftime('%Y-%m-%d'),
+            'close_date': close_date.strftime('%Y-%m-%d'),
+            'holding_days': holding_days,
+            'lots_x': position.lots_x,
+            'lots_y': position.lots_y,
+            'theoretical_ratio': position.theoretical_ratio,
+            'actual_ratio': position.actual_ratio,
+            'open_price_x': position.open_price_x,
+            'open_price_y': position.open_price_y,
+            'close_price_x': close_price_x,
+            'close_price_y': close_price_y,
+            'margin_occupied': position.margin_occupied,
+            'gross_pnl': gross_pnl,
+            'y_pnl': y_pnl,
+            'x_pnl': x_pnl,
+            'open_commission': position.open_commission,
+            'close_commission': close_commission,
+            'net_pnl': net_pnl,
+            'return_on_margin': net_pnl / position.margin_occupied if position.margin_occupied > 0 else 0,
+            'close_reason': reason
+        }
+        
+        self.trade_records.append(trade_record)
+        self.trade_id += 1
+        
+        # 移除持仓
+        del self.positions[pair]
+        
+        logger.info(f"平仓: {pair}, 原因={reason}")
+        logger.info(f"  持仓{holding_days}天, 净PnL={net_pnl:,.0f}")
+        logger.info(f"  收益率: {net_pnl/position.margin_occupied:.2%}")
+        
+        return True
+    
+    def check_risk_control(self, current_date: str, current_prices: Dict[str, float]) -> List[str]:
+        """
+        检查风险控制（止损和时间止损）
         
         Returns:
-            绩效总结字典
+            需要平仓的配对列表
         """
-        # 基础绩效指标
-        basic_metrics = self.calculate_metrics()
+        pairs_to_close = []
+        current_dt = pd.to_datetime(current_date)
         
-        # 配对分析
-        pair_analysis = self.analyze_pairs_performance()
-        top_5_pairs = self.get_top_pairs(5) if len(pair_analysis) > 0 else pd.DataFrame()
+        for pair, position in self.positions.items():
+            # 1. 检查时间止损
+            if self.config.enable_time_stop:
+                holding_days = (current_dt - position.open_date).days
+                if holding_days >= self.config.max_holding_days:
+                    logger.info(f"{pair} 持仓{holding_days}天，触发时间止损")
+                    pairs_to_close.append((pair, 'time_stop'))
+                    continue
+            
+            # 2. 检查止损
+            if self.config.enable_stop_loss:
+                # 获取当前价格
+                price_x = current_prices.get(position.symbol_x)
+                price_y = current_prices.get(position.symbol_y)
+                
+                if price_x is not None and price_y is not None:
+                    # 计算当前PnL
+                    if position.direction == 'open_long':
+                        y_pnl = (price_y - position.open_price_y) * position.lots_y * position.multiplier_y
+                        x_pnl = (position.open_price_x - price_x) * position.lots_x * position.multiplier_x
+                    else:
+                        y_pnl = (position.open_price_y - price_y) * position.lots_y * position.multiplier_y
+                        x_pnl = (price_x - position.open_price_x) * position.lots_x * position.multiplier_x
+                    
+                    current_pnl = y_pnl + x_pnl - position.open_commission
+                    
+                    # 检查是否触发止损
+                    if current_pnl < 0:
+                        loss_pct = abs(current_pnl) / position.margin_occupied
+                        if loss_pct >= self.config.stop_loss_pct:
+                            logger.info(f"{pair} 亏损{loss_pct:.1%}，触发止损")
+                            pairs_to_close.append((pair, 'stop_loss'))
         
-        # 相关性分析
-        correlation_matrix = self.calculate_pairs_correlation()
+        return pairs_to_close
+    
+    def run_backtest(self, signals: pd.DataFrame, prices: pd.DataFrame) -> Dict:
+        """
+        运行回测
         
-        # 资金使用分析
-        capital_analysis = {
-            'initial_capital': self.initial_capital,
-            'final_equity': self.position_manager.total_equity,
-            'max_margin_used': max([r.get('occupied_margin', 0) for r in self.position_manager.daily_records], default=0),
-            'avg_capital_utilization': 0,  # 需要从daily_records计算
-        }
+        Args:
+            signals: 信号数据（来自信号生成模块）
+            prices: 价格数据
+            
+        Returns:
+            回测结果
+        """
+        logger.info("开始回测...")
+        logger.info(f"  信号数量: {len(signals)}")
+        logger.info(f"  日期范围: {signals['date'].min()} 至 {signals['date'].max()}")
         
-        if self.position_manager.daily_records:
-            capital_utilizations = [
-                r['occupied_margin'] / (r['available_capital'] + r['occupied_margin']) 
-                for r in self.position_manager.daily_records
-                if (r['available_capital'] + r['occupied_margin']) > 0
-            ]
-            if capital_utilizations:
-                capital_analysis['avg_capital_utilization'] = np.mean(capital_utilizations)
+        # 按日期分组处理
+        for date in sorted(signals['date'].unique()):
+            # 获取当天价格
+            if date in prices.index:
+                current_prices = prices.loc[date].to_dict()
+            else:
+                continue
+            
+            # 1. 风险控制检查
+            pairs_to_close = self.check_risk_control(date, current_prices)
+            for pair, reason in pairs_to_close:
+                self._close_position(pair, current_prices, reason, date)
+            
+            # 2. 处理当天信号
+            day_signals = signals[signals['date'] == date]
+            for _, signal in day_signals.iterrows():
+                self.process_signal(signal.to_dict(), current_prices)
+            
+            # 3. 记录每日权益
+            self.total_equity = self.available_capital + self.occupied_margin
+            self.equity_curve.append({
+                'date': date,
+                'equity': self.total_equity,
+                'available': self.available_capital,
+                'occupied': self.occupied_margin,
+                'positions': len(self.positions)
+            })
+        
+        # 强制平仓所有未平仓持仓
+        if self.config.force_close_at_end:
+            logger.info("回测结束，强制平仓所有持仓")
+            last_date = signals['date'].max()
+            if last_date in prices.index:
+                last_prices = prices.loc[last_date].to_dict()
+                for pair in list(self.positions.keys()):
+                    self._close_position(pair, last_prices, 'forced', last_date)
+        
+        # 计算绩效指标
+        results = self.calculate_metrics()
+        
+        # 保存结果
+        if self.config.save_trades:
+            self.save_trades()
+        
+        logger.info("回测完成")
+        logger.info(f"  总交易数: {len(self.trade_records)}")
+        logger.info(f"  总收益: {results['total_pnl']:,.0f}")
+        logger.info(f"  收益率: {results['total_return']:.2%}")
+        logger.info(f"  夏普比率: {results.get('sharpe_ratio', 0):.2f}")
+        
+        return results
+    
+    def calculate_metrics(self) -> Dict:
+        """计算绩效指标"""
+        if not self.trade_records:
+            return {
+                'total_trades': 0,
+                'total_pnl': 0,
+                'total_return': 0,
+                'win_rate': 0,
+                'sharpe_ratio': 0,
+                'max_drawdown': 0
+            }
+        
+        # 基础统计
+        trades_df = pd.DataFrame(self.trade_records)
+        total_pnl = trades_df['net_pnl'].sum()
+        total_return = total_pnl / self.config.initial_capital
+        
+        # 胜率
+        winning_trades = trades_df[trades_df['net_pnl'] > 0]
+        win_rate = len(winning_trades) / len(trades_df)
+        
+        # 夏普比率（如果有日收益数据）
+        sharpe_ratio = 0
+        if len(self.equity_curve) > 1:
+            equity_df = pd.DataFrame(self.equity_curve)
+            equity_df['return'] = equity_df['equity'].pct_change()
+            if equity_df['return'].std() > 0:
+                sharpe_ratio = equity_df['return'].mean() / equity_df['return'].std() * np.sqrt(252)
+        
+        # 最大回撤
+        max_drawdown = 0
+        if len(self.equity_curve) > 1:
+            equity_series = pd.Series([e['equity'] for e in self.equity_curve])
+            cummax = equity_series.cummax()
+            drawdown = (equity_series - cummax) / cummax
+            max_drawdown = abs(drawdown.min())
         
         return {
-            'basic_metrics': basic_metrics,
-            'pair_analysis': pair_analysis.to_dict('index') if len(pair_analysis) > 0 else {},
-            'top_pairs': top_5_pairs.to_dict('index') if len(top_5_pairs) > 0 else {},
-            'correlation_matrix': correlation_matrix.to_dict() if len(correlation_matrix) > 0 else {},
-            'capital_analysis': capital_analysis,
-            'risk_events': {
-                'margin_calls': sum(1 for r in self.trade_records if r.get('close_reason') == 'margin_call'),
-                'stop_losses': sum(1 for r in self.trade_records if r.get('close_reason') == 'stop_loss'),
-                'time_stops': sum(1 for r in self.trade_records if r.get('close_reason') == 'time_stop')
-            }
+            'total_trades': len(trades_df),
+            'total_pnl': total_pnl,
+            'total_return': total_return,
+            'annual_return': (1 + total_return) ** (252 / len(self.equity_curve)) - 1 if self.equity_curve else 0,
+            'win_rate': win_rate,
+            'sharpe_ratio': sharpe_ratio,
+            'max_drawdown': max_drawdown,
+            'avg_pnl': trades_df['net_pnl'].mean(),
+            'avg_holding_days': trades_df['holding_days'].mean(),
+            'stop_loss_count': len(trades_df[trades_df['close_reason'] == 'stop_loss']),
+            'time_stop_count': len(trades_df[trades_df['close_reason'] == 'time_stop'])
         }
+    
+    def save_trades(self) -> None:
+        """保存交易记录"""
+        if not self.trade_records:
+            return
+        
+        output_dir = Path(self.config.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 保存交易记录
+        trades_df = pd.DataFrame(self.trade_records)
+        trades_file = output_dir / f"trades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        trades_df.to_csv(trades_file, index=False)
+        logger.info(f"交易记录已保存: {trades_file}")
+        
+        # 保存权益曲线
+        if self.equity_curve:
+            equity_df = pd.DataFrame(self.equity_curve)
+            equity_file = output_dir / f"equity_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            equity_df.to_csv(equity_file, index=False)
+            logger.info(f"权益曲线已保存: {equity_file}")
+
+
+def create_backtest_engine(custom_config: Dict = None) -> BacktestEngine:
+    """
+    创建回测引擎的便捷函数
+    
+    Args:
+        custom_config: 自定义配置字典
+        
+    Example:
+        engine = create_backtest_engine({
+            'initial_capital': 10000000,
+            'stop_loss_pct': 0.10,
+            'max_holding_days': 20
+        })
+    """
+    config = BacktestConfig()
+    
+    # 应用自定义配置
+    if custom_config:
+        for key, value in custom_config.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+    
+    return BacktestEngine(config)
+
+
+if __name__ == "__main__":
+    # 示例：创建一个自定义配置的回测引擎
+    engine = create_backtest_engine({
+        'initial_capital': 10000000,    # 1000万初始资金
+        'margin_rate': 0.15,            # 15%保证金率
+        'stop_loss_pct': 0.10,          # 10%止损
+        'max_holding_days': 20,         # 20天强制平仓
+        'commission_rate': 0.0001,      # 万分之1手续费
+        'slippage_ticks': 2             # 2个tick滑点
+    })
+    
+    print("回测引擎创建成功")
+    print(f"配置参数:")
+    print(f"  初始资金: {engine.config.initial_capital:,.0f}")
+    print(f"  保证金率: {engine.config.margin_rate:.1%}")
+    print(f"  止损线: {engine.config.stop_loss_pct:.1%}")
+    print(f"  最大持仓: {engine.config.max_holding_days}天")

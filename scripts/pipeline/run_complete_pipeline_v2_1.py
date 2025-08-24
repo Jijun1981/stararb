@@ -69,7 +69,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 # 导入最新的原子服务
-from lib.data import load_data
+from lib.data import load_data  # 使用统一的data-joint数据源
 from lib.coint import CointegrationAnalyzer
 from lib.signal_generation import SignalGenerator, calculate_ols_beta
 from lib.backtest import BacktestEngine, PositionManager
@@ -461,8 +461,15 @@ def step4_backtest_execution(signals_df: pd.DataFrame) -> Dict:
         if current_prices:
             pairs_to_close = engine.run_risk_management(current_date, current_prices)
             if pairs_to_close:
-                for pair in pairs_to_close:
-                    logger.info(f"{current_date}: 风控平仓 {pair}")
+                for pair_info in pairs_to_close:
+                    logger.info(f"{current_date}: 风控平仓 {pair_info}")
+                    # 实际执行平仓 - 使用_close_position内部方法
+                    engine._close_position(
+                        pair=pair_info['pair'],
+                        current_prices=current_prices,
+                        current_date=current_date,
+                        reason=pair_info['reason']
+                    )
         
         # 处理当日信号
         if current_date in signals_by_date:

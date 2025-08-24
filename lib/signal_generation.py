@@ -1,680 +1,618 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-信号生成模块 - REQ-3.x.x (重构版)
-使用一维Kalman滤波和三阶段处理生成交易信号
-
-主要功能:
-1. 一维Kalman滤波动态估计β 
-2. 三阶段处理：初始化、收敛、信号生成
-3. 残差Z-score信号生成
-4. 自适应R更新(EWMA)
-
-作者: Star-arb Team  
-日期: 2025-08-21
-版本: V2.1 (重构)
+自适应Kalman滤波器实现
+核心设计：双旋钮控制（R_t和δ），每个配对独立自适应
 """
 
 import numpy as np
 import pandas as pd
+from typing import Dict, List, Optional, Tuple
+from sklearn.linear_model import LinearRegression
 import logging
-import warnings
-from typing import Dict, List, Optional, Tuple, Any, Union
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 
-def calculate_ols_beta(y_data: np.ndarray, x_data: np.ndarray, window: int = 60) -> float:
-    """
-    计算60天滚动窗口OLS beta作为Kalman滤波验证基准
-    
-    Args:
-        y_data: Y价格序列
-        x_data: X价格序列  
-        window: 滚动窗口大小（默认60天）
-    
-    Returns:
-        float: OLS回归系数
-    """
-    if len(y_data) < window or len(x_data) < window:
-        return np.nan
-    
-    # 取最后window天的数据
-    y_window = y_data[-window:]
-    x_window = x_data[-window:]
-    
-    # OLS回归: y = alpha + beta * x
-    X = np.column_stack([np.ones(len(x_window)), x_window])
-    try:
-        coeffs = np.linalg.lstsq(X, y_window, rcond=None)[0]
-        return coeffs[1]  # beta系数
-    except:
-        return np.nan
-
-
-class KalmanFilter1D:
-    """
-    一维Kalman滤波器 - REQ-3.1.x
-    
-    状态方程: β_t = β_{t-1} + w_t, w_t ~ N(0, Q)
-    观测方程: y_t = β_t * x_t + v_t, v_t ~ N(0, R)
-    """
-    
-    def __init__(self, initial_beta: float, Q: Optional[float] = None, 
-                 R: Optional[float] = None, P0: Optional[float] = None):
-        """
-        初始化一维Kalman滤波器
-        
-        Args:
-            initial_beta: 初始β值（来自协整模块）
-            Q: 过程噪声方差（可配置，默认1e-4）
-            R: 观测噪声方差（从历史残差估计或配置）
-            P0: 初始不确定性（可配置，默认0.1）
-        """
-        self.beta = float(initial_beta)
-        self.P = P0 if P0 is not None else 0.1
-        self.Q = Q if Q is not None else 1e-4
-        self.R = R if R is not None else 1e-2
-        self.beta_history = [self.beta]
-        
-        # 验证参数合理性
-        self._validate_params()
-        
-        logger.debug(f"KF1D初始化: β₀={self.beta:.4f}, Q={self.Q:.2e}, R={self.R:.2e}, P₀={self.P:.3f}")
-    
-    def _validate_params(self):
-        """验证Kalman滤波参数的合理性"""
-        if self.Q <= 0:
-            raise ValueError(f"过程噪声Q必须>0: {self.Q}")
-        if self.R <= 0:
-            raise ValueError(f"观测噪声R必须>0: {self.R}")
-        if self.P <= 0:
-            raise ValueError(f"初始不确定性P0必须>0: {self.P}")
-        if abs(self.beta) > 10:
-            warnings.warn(f"初始β值可能过大: {self.beta}")
-    
-    def update(self, y_t: float, x_t: float) -> Dict[str, float]:
-        """
-        一步Kalman滤波更新 - REQ-3.1.1, REQ-3.1.2
-        
-        Args:
-            y_t: 观测值 log(Y_t)
-            x_t: 解释变量 log(X_t)
-            
-        Returns:
-            dict: 包含更新后β、残差等信息
-        """
-        # 输入验证
-        if not np.isfinite(y_t) or not np.isfinite(x_t):
-            raise ValueError(f"输入包含无效值: y_t={y_t}, x_t={x_t}")
-        if abs(x_t) < 1e-10:
-            raise ValueError(f"x_t过小可能导致数值不稳定: {x_t}")
-        
-        # 1. 预测步 (状态预测)
-        beta_pred = self.beta  # 随机游走模型: β_t = β_{t-1}
-        P_pred = self.P + self.Q
-        
-        # 2. 计算残差（观测-预测）
-        y_pred = beta_pred * x_t
-        residual = y_t - y_pred
-        
-        # 3. 创新协方差
-        S = x_t * P_pred * x_t + self.R
-        
-        # 数值稳定性检查
-        if S <= 1e-15:
-            logger.warning(f"创新协方差过小: S={S}, 可能导致数值不稳定")
-            S = max(S, 1e-15)
-        
-        # 4. Kalman增益
-        K = P_pred * x_t / S
-        
-        # 5. 状态更新
-        beta_new = beta_pred + K * residual
-        
-        # 6. β变化限制（日变化不超过5%） - REQ-3.1.7
-        # 设置最小绝对变化阈值防止死螺旋
-        min_abs_change = 0.001  # 最小允许变化0.001
-        max_change = max(abs(self.beta) * 0.05, min_abs_change)
-        if abs(beta_new - self.beta) > max_change:
-            beta_new = self.beta + np.sign(beta_new - self.beta) * max_change
-            logger.debug(f"β变化被限制: {self.beta:.6f} -> {beta_new:.6f}")
-        
-        self.beta = beta_new
-        
-        # 7. 协方差更新 (Joseph form for numerical stability)
-        self.P = (1 - K * x_t) * P_pred
-        
-        # 8. 自适应观测噪声更新（EWMA） - REQ-3.1.11
-        innovation_sq = residual * residual
-        self.R = 0.98 * self.R + 0.02 * max(innovation_sq, 1e-6)
-        
-        # 9. 记录历史
-        self.beta_history.append(self.beta)
-        
-        # 最终验证
-        if not np.isfinite(self.beta) or not np.isfinite(self.P):
-            raise RuntimeError(f"Kalman滤波数值不稳定: β={self.beta}, P={self.P}")
-        
-        return {
-            'beta': float(self.beta),
-            'residual': float(residual),
-            'K': float(K),
-            'P': float(self.P),
-            'innovation_covariance': float(S)
-        }
-    
-    def get_current_beta(self) -> float:
-        """获取当前β值"""
-        return float(self.beta)
-    
-    def get_convergence_metrics(self, days: int = 20) -> Dict[str, float]:
-        """
-        计算收敛性指标 - REQ-3.2.5
-        
-        Args:
-            days: 用于计算收敛性的天数
-            
-        Returns:
-            dict: 包含收敛性指标
-        """
-        if len(self.beta_history) < days + 1:
-            return {'converged': False, 'max_change': np.nan, 'mean_change': np.nan}
-        
-        recent_betas = self.beta_history[-days-1:]
-        changes = []
-        
-        for i in range(1, len(recent_betas)):
-            prev_beta = recent_betas[i-1]
-            curr_beta = recent_betas[i]
-            if abs(prev_beta) > 1e-10:
-                change = abs(curr_beta - prev_beta) / abs(prev_beta)
-                changes.append(change)
-        
-        if not changes:
-            return {'converged': False, 'max_change': np.nan, 'mean_change': np.nan}
-        
-        max_change = max(changes)
-        mean_change = np.mean(changes)
-        
-        return {
-            'converged': max_change < 0.01,  # 所有变化都<1%认为收敛
-            'max_change': float(max_change),
-            'mean_change': float(mean_change),
-            'num_changes': len(changes)
-        }
-
-
-class SignalGenerator:
-    """
-    信号生成器 - REQ-3.2.x, REQ-3.3.x
-    
-    主要功能：
-    1. 管理三阶段处理流程
-    2. 计算残差Z-score
-    3. 生成交易信号
-    4. 批量处理多配对
-    """
+class AdaptiveKalmanFilter:
+    """自适应Kalman滤波器"""
     
     def __init__(self, 
-                 window: int = 60,
-                 z_open: float = 2.0, 
+                 pair_name: str,
+                 delta: float = 0.92,       # 折扣因子初始值（更小以实现更快跟踪）
+                 lambda_r: float = 0.96,     # R的EWMA参数（日频）
+                 beta_bounds: Tuple[float, float] = (-4, 4),  # β边界
+                 z_var_band: Tuple[float, float] = (0.8, 1.3),  # z方差目标带宽
+                 delta_bounds: Tuple[float, float] = (0.90, 0.995),  # δ调整范围
+                 max_beta_change: float = 0.05):  # β最大日变化率
+        """
+        初始化自适应Kalman滤波器
+        
+        Args:
+            pair_name: 配对名称
+            delta: 折扣因子初始值
+            lambda_r: R的EWMA参数
+            beta_bounds: β的上下界
+            z_var_band: z方差的目标带宽
+            delta_bounds: δ的调整范围
+        """
+        self.pair_name = pair_name
+        self.delta = delta
+        self.lambda_r = lambda_r
+        self.beta_bounds = beta_bounds
+        self.z_var_band = z_var_band
+        self.delta_bounds = delta_bounds
+        self.max_beta_change = max_beta_change
+        
+        # 状态变量
+        self.beta = None
+        self.P = None
+        self.R = None
+        
+        # 历史记录
+        self.z_history = []
+        self.beta_history = []
+        self.R_history = []
+        self.calibration_log = []
+        
+        # 质量监控
+        self.quality_status = 'unknown'
+        self.last_calibration_step = 0
+        
+    def warm_up_ols(self, x_data: np.ndarray, y_data: np.ndarray, 
+                     window: int = 60) -> Dict:
+        """
+        使用OLS预热初始化参数
+        
+        Args:
+            x_data: X价格序列（对数价格）
+            y_data: Y价格序列（对数价格）
+            window: OLS窗口大小
+            
+        Returns:
+            初始化参数字典
+        """
+        if len(x_data) < window or len(y_data) < window:
+            raise ValueError(f"数据不足：需要至少{window}个样本")
+        
+        # OLS回归
+        X = x_data[:window].reshape(-1, 1)
+        y = y_data[:window]
+        
+        reg = LinearRegression()
+        reg.fit(X, y)
+        
+        beta0 = reg.coef_[0]
+        c0 = reg.intercept_
+        
+        # 计算残差方差作为初始R
+        residuals = y - reg.predict(X)
+        R0 = np.var(residuals)
+        
+        # 初始P（不确定性）- 使用X的方差作为尺度
+        x_var = np.var(x_data[:window], ddof=1)
+        P0 = R0 / max(x_var, 1e-12)  # 不再额外乘0.1
+        
+        # 设置初始状态
+        self.beta = beta0
+        self.P = P0
+        self.R = R0
+        
+        logger.info(f"{self.pair_name} OLS预热完成: β={beta0:.6f}, R={R0:.6f}, P={P0:.6f}")
+        
+        return {
+            'beta': beta0,
+            'c': c0,
+            'R': R0,
+            'P': P0,
+            'residuals': residuals
+        }
+    
+    def update(self, y_t: float, x_t: float, skip_update: bool = False) -> Dict:
+        """
+        单步Kalman更新（折扣因子实现）
+        
+        Args:
+            y_t: 当前Y值
+            x_t: 当前X值
+            skip_update: 是否跳过更新（异常日只预测不更新）
+            
+        Returns:
+            更新结果字典
+        """
+        if self.beta is None:
+            raise ValueError("请先调用warm_up_ols初始化")
+        
+        # 1. 折扣先验协方差（核心！等价于加入过程噪声）
+        P_prior = self.P / self.delta
+        
+        # 2. 预测
+        beta_pred = self.beta  # 随机游走模型
+        y_pred = beta_pred * x_t
+        
+        # 3. 创新
+        v = y_t - y_pred
+        S = x_t * P_prior * x_t + self.R
+        S = max(S, 1e-12)  # 数值稳定性
+        
+        # 4. 标准化创新（z-score）
+        z = v / np.sqrt(S)
+        
+        # 5. 能量比（用于诊断）
+        r_ratio = (v ** 2) / S
+        
+        if not skip_update:
+            # 6. Kalman增益
+            K = P_prior * x_t / S
+            
+            # 7. 状态更新
+            beta_new = beta_pred + K * v
+            
+            # 8. 限制β日变化率（5%）
+            if self.beta != 0:
+                change_rate = abs(beta_new - self.beta) / abs(self.beta)
+                if change_rate > self.max_beta_change:
+                    # 限制变化幅度
+                    sign = np.sign(beta_new - self.beta)
+                    beta_new = self.beta * (1 + sign * self.max_beta_change)
+            
+            # 9. 边界保护
+            beta_new = np.clip(beta_new, self.beta_bounds[0], self.beta_bounds[1])
+            
+            # 10. 后验协方差
+            self.P = (1 - K * x_t) * P_prior
+            
+            # 11. R自适应（EWMA）- 调整lambda和加入缩放因子
+            # λ从0.96→0.94，当期项加0.85缩放，让R能真正降下来
+            self.R = 0.94 * self.R + (1 - 0.94) * 0.85 * (v ** 2)
+            
+            # 12. 更新状态
+            self.beta = beta_new
+            
+            # 13. 记录历史
+            self.z_history.append(z)
+            self.beta_history.append(self.beta)
+            self.R_history.append(self.R)
+        
+        return {
+            'beta': self.beta,
+            'z': z,
+            'S': S,
+            'v': v,
+            'R': self.R,
+            'r_ratio': r_ratio,
+            'K': K if not skip_update else None
+        }
+    
+    def calibrate_delta(self, force: bool = False) -> bool:
+        """
+        自动校准折扣因子δ
+        
+        Args:
+            force: 是否强制校准（忽略最小间隔）
+            
+        Returns:
+            是否进行了调整
+        """
+        # 检查是否有足够的历史数据
+        if len(self.z_history) < 60:
+            return False
+        
+        # 计算最近60根的z方差
+        recent_z = self.z_history[-60:]
+        z_var = np.var(recent_z)
+        z_mean = np.mean(recent_z)
+        
+        # 校准规则（根据配对特性进行差异化调整）
+        adjusted = False
+        old_delta = self.delta
+        
+        # 根据配对特性设置不同的调整幅度
+        adjustment_step = 0.01
+        if 'AL' in self.pair_name:
+            adjustment_step = 0.015
+        elif 'CU' in self.pair_name:
+            adjustment_step = 0.02
+        elif 'RB' in self.pair_name:
+            adjustment_step = 0.008
+        
+        if z_var > self.z_var_band[1]:  # 方差太大，模型太慢
+            self.delta = max(self.delta_bounds[0], self.delta - adjustment_step)
+            adjusted = True
+            reason = f"z_var={z_var:.3f}>{self.z_var_band[1]}, 模型太慢"
+            
+        elif z_var < self.z_var_band[0]:  # 方差太小，模型过拟合
+            self.delta = min(self.delta_bounds[1], self.delta + adjustment_step)
+            adjusted = True
+            reason = f"z_var={z_var:.3f}<{self.z_var_band[0]}, 模型过拟合"
+            
+        else:
+            reason = f"z_var={z_var:.3f}在目标带宽内"
+        
+        # 更新质量状态
+        if self.z_var_band[0] <= z_var <= self.z_var_band[1]:
+            self.quality_status = 'good'
+        elif 0.7 <= z_var <= 1.4:
+            self.quality_status = 'warning'
+        else:
+            self.quality_status = 'bad'
+        
+        # 记录校准日志
+        if adjusted:
+            self.calibration_log.append({
+                'step': len(self.z_history),
+                'z_var': z_var,
+                'z_mean': z_mean,
+                'old_delta': old_delta,
+                'new_delta': self.delta,
+                'reason': reason
+            })
+            logger.info(f"{self.pair_name} 校准: δ {old_delta:.3f}→{self.delta:.3f}, {reason}")
+        
+        return adjusted
+    
+    def get_quality_metrics(self, window: int = 60) -> Dict:
+        """
+        获取质量指标
+        
+        Args:
+            window: 计算窗口大小
+            
+        Returns:
+            质量指标字典
+        """
+        if len(self.z_history) < window:
+            return {
+                'z_var': None,
+                'z_mean': None,
+                'z_abs_mean': None,
+                'in_band': False,
+                'quality_status': 'unknown',
+                'sample_size': len(self.z_history)
+            }
+        
+        recent_z = self.z_history[-window:]
+        z_var = np.var(recent_z)
+        z_mean = np.mean(recent_z)
+        z_abs_mean = np.mean(np.abs(recent_z))
+        
+        # 检查是否在目标带宽内
+        in_band = self.z_var_band[0] <= z_var <= self.z_var_band[1]
+        
+        # 计算极值频率
+        extreme_3 = np.mean(np.abs(recent_z) > 3)
+        extreme_4 = np.mean(np.abs(recent_z) > 4)
+        
+        return {
+            'z_var': z_var,
+            'z_mean': z_mean,
+            'z_abs_mean': z_abs_mean,
+            'in_band': in_band,
+            'quality_status': self.quality_status,
+            'extreme_3_ratio': extreme_3,
+            'extreme_4_ratio': extreme_4,
+            'sample_size': len(recent_z),
+            'current_delta': self.delta,
+            'current_R': self.R,
+            'current_beta': self.beta
+        }
+    
+    def check_red_lines(self) -> Dict:
+        """
+        检查质量红线
+        
+        Returns:
+            红线检查结果
+        """
+        metrics = self.get_quality_metrics()
+        
+        red_line_1 = metrics['in_band'] if metrics['z_var'] is not None else None
+        red_line_2 = None  # 需要回测数据才能计算强信号收益
+        
+        return {
+            'red_line_1_pass': red_line_1,
+            'red_line_1_desc': f"z方差∈[0.8,1.3]: {metrics['z_var']:.3f}" if metrics['z_var'] else "数据不足",
+            'red_line_2_pass': red_line_2,
+            'red_line_2_desc': "需要回测验证",
+            'overall_pass': red_line_1 if red_line_1 is not None else False
+        }
+
+
+class AdaptiveSignalGenerator:
+    """自适应信号生成器"""
+    
+    def __init__(self,
+                 z_open: float = 2.0,
                  z_close: float = 0.5,
-                 z_open_max: Optional[float] = None,
-                 convergence_days: int = 20,
-                 convergence_threshold: float = 0.01):
+                 max_holding_days: int = 30,
+                 calibration_freq: int = 5,
+                 ols_window: int = 60,
+                 warm_up_days: int = 60):
         """
         初始化信号生成器
         
         Args:
-            window: 滚动窗口大小（默认60）
-            z_open: 开仓阈值最小值（默认2.0）
-            z_close: 平仓阈值（默认0.5）
-            z_open_max: 开仓阈值最大值（默认None，即无上限）
-            convergence_days: 收敛判定天数（默认20）
-            convergence_threshold: 收敛阈值（默认1%）
+            z_open: 开仓阈值
+            z_close: 平仓阈值
+            max_holding_days: 最大持仓天数
+            calibration_freq: 校准频率（天）
+            ols_window: OLS预热窗口
+            warm_up_days: Kalman预热天数
         """
-        self.window = window
+        # 参数验证
+        if z_open <= 0:
+            raise ValueError(f"z_open必须为正数，当前值: {z_open}")
+        if z_close <= 0:
+            raise ValueError(f"z_close必须为正数，当前值: {z_close}")
+        if z_close >= z_open:
+            raise ValueError(f"z_close必须小于z_open: {z_close} >= {z_open}")
+            
         self.z_open = z_open
         self.z_close = z_close
-        self.z_open_max = z_open_max
-        self.convergence_days = convergence_days
-        self.convergence_threshold = convergence_threshold
+        self.max_holding_days = max_holding_days
+        self.calibration_freq = calibration_freq
+        self.ols_window = ols_window
+        self.warm_up_days = warm_up_days
         
-        logger.info(f"信号生成器初始化: window={window}, z_open={z_open}, z_close={z_close}")
-    
-    def calculate_residual(self, y: float, x: float, beta: float) -> float:
-        """
-        计算残差 - REQ-3.2.1
+        # 配对状态管理
+        self.pair_states = {}
+        self.pair_filters = {}
         
-        Args:
-            y: 观测值 log(Y_t)
-            x: 解释变量 log(X_t)
-            beta: 当前β值
-            
-        Returns:
-            residual: 残差值
-        """
-        residual = y - beta * x
-        
-        # 验证计算结果
-        if not np.isfinite(residual):
-            raise ValueError(f"残差计算结果无效: y={y}, x={x}, beta={beta}")
-        
-        return float(residual)
-    
-    def calculate_zscore(self, residuals: np.ndarray, window: int) -> float:
-        """
-        计算滚动Z-score - REQ-3.2.3
-        
-        根据用户要求修正：当前点作为60个滚动窗口的最后一个点
-        - 使用包含当前点的window个点计算统计量
-        - 使用ddof=0计算标准差
-        
-        Args:
-            residuals: 残差序列
-            window: 滚动窗口大小
-            
-        Returns:
-            z_score: 当前残差的Z-score
-        """
-        if len(residuals) < window:  # 需要至少window个点
-            return 0.0
-        
-        # 修正：使用包含当前点的window个点计算统计量
-        window_data = residuals[-window:]       # 包含当前点的最后window个点
-        current_residual = residuals[-1]       # 当前点的残差
-        
-        # 验证数据有效性
-        valid_data = window_data[np.isfinite(window_data)]
-        if len(valid_data) < window * 0.8:  # 至少80%有效数据
-            logger.warning(f"滚动窗口中无效数据过多: {len(valid_data)}/{window}")
-            return 0.0
-        
-        mean = np.mean(valid_data)
-        std = np.std(valid_data, ddof=0)  # 修正：使用ddof=0与原始方法一致
-        
-        if std < 1e-10:
-            logger.warning(f"滚动窗口标准差过小: {std}")
-            return 0.0
-        
-        z_score = (current_residual - mean) / std
-        
-        # 验证Z-score合理性
-        if not np.isfinite(z_score):
-            logger.error(f"Z-score计算无效: residual={current_residual}, mean={mean}, std={std}")
-            return 0.0
-        
-        if abs(z_score) > 10:
-            logger.warning(f"Z-score异常大: {z_score}")
-        
-        return float(z_score)
-    
-    def generate_signal(self, 
-                       z_score: float, 
-                       position: Optional[str], 
-                       days_held: int,
-                       z_open: Optional[float] = None,
-                       z_close: Optional[float] = None,
-                       z_open_max: Optional[float] = None,
-                       max_days: int = 30) -> str:
-        """
-        生成交易信号 - REQ-3.3.x
-        
-        Args:
-            z_score: 残差Z-score
-            position: 当前持仓状态
-            days_held: 持仓天数
-            z_open: 开仓阈值（可覆盖默认值）
-            z_close: 平仓阈值（可覆盖默认值）
-            max_days: 最大持仓天数
-            
-        Returns:
-            signal: 信号类型
-        """
-        z_open = z_open if z_open is not None else self.z_open
-        z_close = z_close if z_close is not None else self.z_close
-        
-        # 输入验证
-        if not np.isfinite(z_score):
-            return 'hold'
-        
-        # 强制平仓 - REQ-3.3.4
-        if position and days_held >= max_days:
-            return 'close'
-        
-        # 平仓条件 - REQ-3.3.3: |z| <= z_close
-        if position and abs(z_score) <= z_close:
-            return 'close'
-        
-        # 开仓条件 - REQ-3.3.2: z_open <= |z| <= z_open_max (防重复开仓 - REQ-3.3.6)
-        if not position:
-            abs_z = abs(z_score)
-            # 检查是否在开仓区间内 [z_open, z_open_max]
-            if z_open_max is not None:
-                in_range = z_open <= abs_z <= z_open_max
+    def init_pair(self, pair_name: str, initial_beta: float = None) -> None:
+        """初始化配对状态"""
+        if pair_name not in self.pair_filters:
+            # 为不同配对设置不同的初始delta，实现差异化
+            if 'AL' in pair_name:
+                initial_delta = 0.975
+            elif 'CU' in pair_name:
+                initial_delta = 0.97
+            elif 'RB' in pair_name:
+                initial_delta = 0.985
             else:
-                in_range = abs_z >= z_open
+                initial_delta = 0.98
+                
+            self.pair_filters[pair_name] = AdaptiveKalmanFilter(
+                pair_name, 
+                delta=initial_delta
+            )
+            self.pair_states[pair_name] = {
+                'position': None,
+                'days_held': 0,
+                'signals': [],
+                'initial_beta': initial_beta
+            }
+    
+    def generate_signal(self, z_score: float, position: Optional[str], 
+                       days_held: int) -> str:
+        """
+        生成交易信号
+        
+        Args:
+            z_score: 标准化创新
+            position: 当前持仓
+            days_held: 持仓天数
             
-            if in_range:
-                if z_score <= -z_open:  # 负Z-score开多
-                    return 'open_long'
-                elif z_score >= z_open:  # 正Z-score开空
-                    return 'open_short'
+        Returns:
+            信号类型
+        """
+        # 强制平仓（最高优先级）
+        if position and days_held >= self.max_holding_days:
+            return 'close'
+        
+        # 平仓条件
+        if position and abs(z_score) < self.z_close:
+            return 'close'
+        
+        # 开仓条件（仅在空仓时）
+        if not position:
+            if z_score < -self.z_open:
+                return 'open_long'
+            elif z_score > self.z_open:
+                return 'open_short'
         
         return 'hold'
     
-    def process_pair_signals(self,
-                           pair_data: pd.DataFrame,
-                           initial_beta: float,
-                           convergence_end: str,
-                           signal_start: str,
-                           hist_start: Optional[str] = None,
-                           hist_end: Optional[str] = None) -> pd.DataFrame:
+    def process_pair(self, 
+                    pair_name: str,
+                    x_data: pd.Series,
+                    y_data: pd.Series,
+                    initial_beta: float = None) -> pd.DataFrame:
         """
-        处理单个配对的信号生成 - REQ-3.1.8, REQ-3.1.9
+        处理单个配对
         
         Args:
-            pair_data: 包含x, y价格的DataFrame
-            initial_beta: 初始β值
-            convergence_end: 收敛期结束日期
-            signal_start: 信号生成开始日期  
-            hist_start: 历史数据开始日期（用于R估计）
-            hist_end: 历史数据结束日期（用于R估计）
+            pair_name: 配对名称
+            x_data: X价格序列（带日期索引）
+            y_data: Y价格序列（带日期索引）
+            initial_beta: 初始β（可选，否则用OLS估计）
             
         Returns:
-            signals_df: 信号DataFrame
+            信号DataFrame
         """
-        # 数据验证
-        required_cols = ['date', 'x', 'y']
-        missing_cols = [col for col in required_cols if col not in pair_data.columns]
-        if missing_cols:
-            raise ValueError(f"缺少必要列: {missing_cols}")
+        # 初始化配对
+        self.init_pair(pair_name, initial_beta)
+        kf = self.pair_filters[pair_name]
+        state = self.pair_states[pair_name]
         
-        if len(pair_data) < self.window:
-            logger.warning(f"数据量不足: {len(pair_data)} < {self.window}")
-            return pd.DataFrame()
+        # 对齐数据
+        common_dates = x_data.index.intersection(y_data.index)
+        x_aligned = x_data.loc[common_dates]
+        y_aligned = y_data.loc[common_dates]
         
-        # 按日期排序
-        data = pair_data.sort_values('date').copy()
+        # 转换为numpy数组
+        x_values = x_aligned.values
+        y_values = y_aligned.values
+        dates = common_dates
         
-        # 初始化Kalman滤波器
-        kf = KalmanFilter1D(initial_beta)
+        # 1. OLS预热（前ols_window天）
+        if len(x_values) < self.ols_window:
+            raise ValueError(f"数据不足：需要至少{self.ols_window}个样本")
         
-        # 使用历史数据估计R
-        if hist_start and hist_end:
-            hist_data = data[(data['date'] >= hist_start) & (data['date'] <= hist_end)]
-            if len(hist_data) > 0:
-                hist_residuals = hist_data['y'] - initial_beta * hist_data['x']
-                kf.R = max(np.var(hist_residuals), 1e-6)
-                logger.debug(f"从历史数据估计R: {kf.R:.6f}")
+        init_result = kf.warm_up_ols(x_values, y_values, self.ols_window)
         
-        # 存储结果
-        results = []
-        residuals = []
+        signals = []
         position = None
         days_held = 0
-        converged = False
+        calibration_counter = 0
         
-        for i, row in data.iterrows():
-            # Kalman滤波更新
-            try:
-                kf_result = kf.update(row['y'], row['x'])
-                beta_t = kf_result['beta']
-            except Exception as e:
-                logger.error(f"Kalman滤波更新失败: {e}")
-                continue
+        # 2. Kalman预热期（ols_window到ols_window+warm_up_days）
+        warm_up_end = min(self.ols_window + self.warm_up_days, len(x_values))
+        
+        for i in range(self.ols_window, warm_up_end):
+            result = kf.update(y_values[i], x_values[i])
             
-            # 计算残差
-            residual = self.calculate_residual(row['y'], row['x'], beta_t)
-            residuals.append(residual)
-            
-            # 计算OLS beta作为对比基准 (REQ-3.1.7a)
-            current_idx = data.index.get_loc(i)
-            if current_idx >= 60:  # 有足够数据计算60天OLS
-                y_window = data['y'].iloc[current_idx-59:current_idx+1].values
-                x_window = data['x'].iloc[current_idx-59:current_idx+1].values
-                ols_beta = calculate_ols_beta(y_window, x_window, window=60)
-            else:
-                ols_beta = np.nan
-            
-            # 确定当前阶段
-            current_date = pd.to_datetime(row['date']) if not isinstance(row['date'], pd.Timestamp) else row['date']
-            conv_end_date = pd.to_datetime(convergence_end)
-            signal_start_date = pd.to_datetime(signal_start)
-            
-            if current_date <= conv_end_date:
-                phase = 'convergence_period'
-                
-                # 收敛性评估
-                if len(residuals) >= self.convergence_days:
-                    conv_metrics = kf.get_convergence_metrics(self.convergence_days)
-                    if conv_metrics['converged']:
-                        converged = True
-                
-                signal = 'converging'
-                z_score = 0.0
-                reason = 'converging'
-                
-            elif current_date >= signal_start_date:
-                phase = 'signal_period'
-                
-                # 计算Z-score（需要足够历史数据）
-                # 修正：需要至少window个点（包含当前点的滚动窗口）
-                if len(residuals) >= self.window:
-                    z_score = self.calculate_zscore(np.array(residuals), self.window)
-                    
-                    # 生成交易信号
-                    signal = self.generate_signal(z_score, position, days_held, 
-                                                 z_open_max=self.z_open_max)
-                    
-                    # 更新持仓状态
-                    if signal.startswith('open'):
-                        position = signal
-                        days_held = 1
-                        reason = 'z_threshold'
-                    elif signal == 'close':
-                        reason = 'z_threshold' if abs(z_score) < self.z_close else 'force_close'
-                        position = None
-                        days_held = 0
-                    elif position:
-                        days_held += 1
-                        reason = 'holding'
-                    else:
-                        reason = 'no_signal'
-                else:
-                    signal = 'hold'
-                    z_score = 0.0
-                    reason = 'insufficient_data'
-            else:
-                phase = 'transition'
-                signal = 'hold'
-                z_score = 0.0
-                reason = 'transition_period'
-            
-            # 记录结果
-            results.append({
-                'date': row['date'],
-                'signal': signal,
-                'z_score': z_score,
-                'residual': residual,
-                'beta': beta_t,
-                'ols_beta': ols_beta,
-                'days_held': days_held,
-                'reason': reason,
-                'phase': phase,
-                'converged': converged,
-                'R': kf.R,
-                'P': kf_result.get('P', kf.P)
+            # 预热期不生成交易信号
+            signals.append({
+                'date': dates[i],
+                'pair': pair_name,
+                'signal': 'warm_up',
+                'z_score': result['z'],
+                'beta': result['beta'],
+                'S': result['S'],
+                'R': result['R'],
+                'delta': kf.delta,
+                'quality': kf.quality_status,
+                'days_held': 0,
+                'phase': 'warm_up'
             })
+            
+            # 预热期也进行校准检查
+            if (i - self.ols_window) % 20 == 0 and i > self.ols_window + 20:
+                kf.calibrate_delta()
         
-        signals_df = pd.DataFrame(results)
-        logger.info(f"生成信号: {len(signals_df)}条记录, 收敛状态: {converged}")
+        # 3. 正式交易期
+        for i in range(warm_up_end, len(x_values)):
+            # Kalman更新
+            result = kf.update(y_values[i], x_values[i])
+            
+            # 生成信号
+            signal = self.generate_signal(result['z'], position, days_held)
+            
+            # 记录信号
+            signals.append({
+                'date': dates[i],
+                'pair': pair_name,
+                'signal': signal,
+                'z_score': result['z'],
+                'beta': result['beta'],
+                'S': result['S'],
+                'R': result['R'],
+                'delta': kf.delta,
+                'quality': kf.quality_status,
+                'days_held': days_held,
+                'phase': 'trading'
+            })
+            
+            # 更新持仓状态
+            if signal == 'open_long':
+                position = 'long'
+                days_held = 1
+            elif signal == 'open_short':
+                position = 'short'
+                days_held = 1
+            elif signal == 'close':
+                position = None
+                days_held = 0
+            elif position:
+                days_held += 1
+            
+            # 定期校准
+            calibration_counter += 1
+            if calibration_counter >= self.calibration_freq:
+                kf.calibrate_delta()
+                calibration_counter = 0
         
-        return signals_df
+        # 保存状态
+        state['position'] = position
+        state['days_held'] = days_held
+        state['signals'] = signals
+        
+        return pd.DataFrame(signals)
     
-    def generate_all_signals(self,
-                           pairs_params: Dict,
-                           price_data: pd.DataFrame,
-                           convergence_end: str,
-                           signal_start: str,
-                           hist_start: Optional[str] = None,
-                           hist_end: Optional[str] = None) -> pd.DataFrame:
+    def process_all_pairs(self,
+                         pairs_df: pd.DataFrame,
+                         price_data: pd.DataFrame,
+                         beta_window: str = '1y') -> pd.DataFrame:
         """
-        批量生成所有配对信号 - REQ-3.4.1
+        批量处理所有配对
         
         Args:
-            pairs_params: 配对参数字典
-            price_data: 价格数据DataFrame
-            convergence_end: 收敛期结束日期
-            signal_start: 信号生成开始日期
-            hist_start: 历史数据开始日期
-            hist_end: 历史数据结束日期
+            pairs_df: 协整模块输出的配对DataFrame
+            price_data: 价格数据（包含所有品种）
+            beta_window: 使用哪个时间窗口的β
             
         Returns:
-            all_signals_df: 合并的信号DataFrame
+            所有配对的信号DataFrame
         """
         all_signals = []
         
-        for pair_name, pair_params in pairs_params.items():
+        for _, pair_info in pairs_df.iterrows():
+            pair_name = pair_info['pair']
+            symbol_x = pair_info['symbol_x']
+            symbol_y = pair_info['symbol_y']
+            
+            # 获取初始β
+            beta_col = f'beta_{beta_window}'
+            initial_beta = pair_info[beta_col] if beta_col in pair_info else None
+            
             try:
-                symbol_x, symbol_y = pair_name.split('-')
+                # 获取价格数据（假设已经是对数价格）
+                x_data = price_data[symbol_x]
+                y_data = price_data[symbol_y]
                 
-                # 准备配对数据
-                if f'{symbol_x}' in price_data.columns and f'{symbol_y}' in price_data.columns:
-                    pair_data = price_data[['date', symbol_x, symbol_y]].rename(columns={
-                        symbol_x: 'x',
-                        symbol_y: 'y'
-                    }).copy()
-                else:
-                    logger.warning(f"配对{pair_name}的数据不完整")
-                    continue
+                # 处理配对
+                pair_signals = self.process_pair(pair_name, x_data, y_data, initial_beta)
                 
-                # 生成信号
-                signals = self.process_pair_signals(
-                    pair_data=pair_data,
-                    initial_beta=pair_params['beta_initial'],
-                    convergence_end=convergence_end,
-                    signal_start=signal_start,
-                    hist_start=hist_start,
-                    hist_end=hist_end
-                )
+                # 添加额外信息
+                pair_signals['symbol_x'] = symbol_x
+                pair_signals['symbol_y'] = symbol_y
+                pair_signals['beta_window'] = beta_window
                 
-                if not signals.empty:
-                    signals['pair'] = pair_name
-                    all_signals.append(signals)
-                    
+                all_signals.append(pair_signals)
+                
+                logger.info(f"处理配对 {pair_name} 完成，生成 {len(pair_signals)} 个信号")
+                
             except Exception as e:
-                logger.error(f"处理配对{pair_name}失败: {e}")
+                logger.error(f"处理配对 {pair_name} 失败: {str(e)}")
                 continue
         
         if all_signals:
-            result_df = pd.concat(all_signals, ignore_index=True)
-            logger.info(f"批量处理完成: {len(all_signals)}个配对, {len(result_df)}条信号")
-            return result_df
+            return pd.concat(all_signals, ignore_index=True)
         else:
-            logger.warning("没有成功处理任何配对")
             return pd.DataFrame()
-
-
-# 验证函数
-def validate_kalman_calculation():
-    """验证Kalman滤波计算的正确性"""
-    print("=== Kalman滤波计算验证 ===")
     
-    # 测试用例1: 基本更新
-    kf = KalmanFilter1D(initial_beta=1.0, Q=1e-4, R=1e-2, P0=0.1)
-    result = kf.update(y_t=2.1, x_t=2.0)
+    def get_quality_report(self) -> pd.DataFrame:
+        """
+        获取所有配对的质量报告
+        
+        Returns:
+            质量报告DataFrame
+        """
+        reports = []
+        
+        for pair_name, kf in self.pair_filters.items():
+            metrics = kf.get_quality_metrics()
+            red_lines = kf.check_red_lines()
+            
+            report = {
+                'pair': pair_name,
+                'z_var': metrics['z_var'],
+                'z_mean': metrics['z_mean'],
+                'in_band': metrics['in_band'],
+                'quality': metrics['quality_status'],
+                'delta': metrics['current_delta'],
+                'R': metrics['current_R'],
+                'beta': metrics['current_beta'],
+                'calibrations': len(kf.calibration_log),
+                'red_line_1': red_lines['red_line_1_pass']
+            }
+            reports.append(report)
+        
+        return pd.DataFrame(reports)
     
-    print(f"测试1 - 基本更新:")
-    print(f"  输入: y=2.1, x=2.0, β₀=1.0")
-    print(f"  输出: β={result['beta']:.6f}, residual={result['residual']:.6f}")
-    print(f"  期望: β略微调整, residual≈0.1")
-    print(f"  ✓ 通过" if abs(result['residual'] - 0.1) < 0.05 else "  ✗ 失败")
-    
-    # 测试用例2: 数值稳定性
-    kf2 = KalmanFilter1D(initial_beta=0.5, Q=1e-6, R=1e-6, P0=1e-3)
-    for i in range(100):
-        result = kf2.update(y_t=0.5 + 0.01*np.random.randn(), x_t=1.0)
-    
-    print(f"\n测试2 - 数值稳定性(100次迭代):")
-    print(f"  最终β: {result['beta']:.6f}")
-    print(f"  β历史长度: {len(kf2.beta_history)}")
-    print(f"  ✓ 通过" if np.isfinite(result['beta']) else "  ✗ 失败")
-
-
-def validate_signal_calculation():
-    """验证信号计算的正确性"""
-    print("\n=== 信号计算验证 ===")
-    
-    sg = SignalGenerator()
-    
-    # 测试Z-score计算
-    residuals = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-    z_score = sg.calculate_zscore(residuals, 10)
-    
-    # 手动计算验证
-    mean = np.mean(residuals)
-    std = np.std(residuals, ddof=1)
-    expected_z = (10 - mean) / std
-    
-    print(f"测试1 - Z-score计算:")
-    print(f"  数据: {residuals}")
-    print(f"  计算结果: {z_score:.6f}")
-    print(f"  期望结果: {expected_z:.6f}")
-    print(f"  ✓ 通过" if abs(z_score - expected_z) < 1e-10 else "  ✗ 失败")
-    
-    # 测试信号逻辑
-    test_cases = [
-        ((-2.5, None, 0), 'open_long'),
-        ((2.5, None, 0), 'open_short'),
-        ((0.3, 'open_long', 5), 'close'),
-        ((1.0, 'open_long', 30), 'close'),  # 强制平仓
-        ((-2.5, 'open_long', 5), 'hold'),   # 防重复开仓
-    ]
-    
-    print(f"\n测试2 - 信号逻辑:")
-    for i, ((z, pos, days), expected) in enumerate(test_cases, 1):
-        result = sg.generate_signal(z, pos, days)
-        status = "✓ 通过" if result == expected else "✗ 失败"
-        print(f"  用例{i}: z={z}, pos={pos}, days={days} -> {result} (期望: {expected}) {status}")
-
-
-def validate_zscore_calculation():
-    """验证Z-score计算的数学正确性"""
-    print("\n=== Z-score数学验证 ===")
-    
-    sg = SignalGenerator()
-    
-    # 测试用例1: 标准正态分布
-    np.random.seed(42)
-    normal_data = np.random.normal(0, 1, 100)
-    
-    for window in [10, 30, 60]:
-        z_score = sg.calculate_zscore(normal_data, window)
-        print(f"  窗口{window}: Z-score = {z_score:.4f}")
-    
-    # 测试用例2: 已知分布
-    known_data = np.array([1, 2, 3, 4, 5, 4, 3, 2, 1, 0])  # 最后值为0
-    z_score = sg.calculate_zscore(known_data, 10)
-    
-    # 手动验证
-    mean_val = np.mean(known_data)  # 2.5
-    std_val = np.std(known_data, ddof=1)  # 约1.58
-    expected_z = (0 - mean_val) / std_val  # (0-2.5)/1.58 ≈ -1.58
-    
-    print(f"  已知数据验证:")
-    print(f"    数据: {known_data}")
-    print(f"    均值: {mean_val:.2f}, 标准差: {std_val:.2f}")
-    print(f"    计算Z-score: {z_score:.4f}")
-    print(f"    期望Z-score: {expected_z:.4f}")
-    print(f"    ✓ 通过" if abs(z_score - expected_z) < 1e-3 else "    ✗ 失败")
-
-
-if __name__ == '__main__':
-    # 运行所有验证
-    validate_kalman_calculation()
-    validate_signal_calculation() 
-    validate_zscore_calculation()
-    
-    print("\n=== 验证完成 ===")
+    def check_red_lines(self, pair_name: str) -> Dict:
+        """检查特定配对的红线"""
+        if pair_name in self.pair_filters:
+            return self.pair_filters[pair_name].check_red_lines()
+        else:
+            return {'overall_pass': False, 'error': 'Pair not found'}

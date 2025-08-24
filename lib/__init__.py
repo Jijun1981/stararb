@@ -4,7 +4,7 @@
 模块架构:
 - data: 数据管理模块 (REQ-1.x.x)
 - coint: 协整配对模块 (REQ-2.x.x, 包含β估计功能)  
-- signal_generation: 信号生成模块 (REQ-3.x.x)
+- signal_generation: 信号生成模块 (REQ-3.x.x) - 自适应Kalman滤波实现
 - backtest: 回测框架模块 (REQ-4.x.x)
 """
 
