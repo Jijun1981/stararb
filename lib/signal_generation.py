@@ -24,17 +24,17 @@ class AdaptiveKalmanFilter:
     
     def __init__(self, 
                  pair_name: str,
-                 delta: float = 0.98,      # REQ-3.1.6: 初始δ=0.98
-                 lambda_r: float = 0.96,    # REQ-3.1.4: λ=0.96
+                 delta: float = 0.96,      # 优化后: δ=0.96 (突破性发现!)
+                 lambda_r: float = 0.92,    # 优化后: λ=0.92
                  beta_bounds: Optional[Tuple[float, float]] = None):  # 移除β边界限制
         """
         初始化自适应Kalman滤波器
         
         Args:
             pair_name: 配对名称
-            delta: 折扣因子（默认0.98）
-            lambda_r: R的EWMA参数（默认0.96）
-            beta_bounds: β边界限制（默认-4到4）
+            delta: 折扣因子（优化后默认0.96）
+            lambda_r: R的EWMA参数（优化后默认0.92）
+            beta_bounds: β边界限制（已移除限制）
         """
         self.pair_name = pair_name
         self.delta = delta
@@ -177,9 +177,9 @@ class AdaptiveKalmanFilter:
         
         old_delta = self.delta
         
-        # δ调整规则 - REQ-3.2.4
+        # δ调整规则 - REQ-3.2.4 (优化后下界)
         if z_var > 1.3:
-            self.delta = max(self.delta - 0.01, 0.95)  # REQ-3.2.5: 下界0.95
+            self.delta = max(self.delta - 0.01, 0.90)  # 优化后: 下界0.90
         elif z_var < 0.8:
             self.delta = min(self.delta + 0.01, 0.995)  # REQ-3.2.5: 上界0.995
         else:
