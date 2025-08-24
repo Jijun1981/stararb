@@ -32,14 +32,16 @@ def test_single_pair():
     ols_result = kf.warm_up_ols(y_data[-150:-90], x_data[-150:-90])
     
     logger.info(f"\nOLS初始化结果:")
+    logger.info(f"  初始α: {ols_result['alpha']:.6f}")
     logger.info(f"  初始β: {ols_result['beta']:.6f}")
     logger.info(f"  初始R: {ols_result['R']:.6f}")
-    logger.info(f"  初始P: {ols_result['P']:.6f}")
+    logger.info(f"  初始P_α: {ols_result['P'][0,0]:.6f}")
+    logger.info(f"  初始P_β: {ols_result['P'][1,1]:.6f}")
     
     # 测试X的方差
     x_var = np.var(x_data[-150:-90], ddof=1)
     logger.info(f"  X方差: {x_var:.6f}")
-    logger.info(f"  P/R比例: {ols_result['P']/ols_result['R']:.6f}")
+    logger.info(f"  P_β/R比例: {ols_result['P'][1,1]/ols_result['R']:.6f}")
     
     # 运行Kalman更新
     z_scores = []
@@ -67,14 +69,17 @@ def test_single_pair():
     logger.info(f"  |z|>1.5的比例: {np.mean(np.abs(z_scores) > 1.5)*100:.2f}%")
     
     logger.info(f"\n最终参数:")
-    logger.info(f"  最终β: {kf.beta:.6f}")
-    logger.info(f"  最终P: {kf.P:.6f}")
+    logger.info(f"  最终α: {kf.state[0]:.6f}")
+    logger.info(f"  最终β: {kf.state[1]:.6f}")
+    logger.info(f"  最终P_β: {kf.P[1,1]:.6f}")
     logger.info(f"  最终R: {kf.R:.6f}")
     logger.info(f"  最终δ: {kf.delta:.6f}")
     
     # 比较改进前后
     logger.info(f"\n改进效果分析:")
-    logger.info(f"  P0使用X方差尺度: P0 = R0 / x_var = {ols_result['R']:.2f} / {x_var:.2f} = {ols_result['P']:.2f}")
+    logger.info(f"  二维状态空间: [α, β]")
+    logger.info(f"  P_β使用去中心化X方差: P_β = R0 / x_var_centered")
+    logger.info(f"  R夹板范围: [{0.25*ols_result['R']:.2f}, {20*ols_result['R']:.2f}]")
     logger.info(f"  R的EWMA系数: λ=0.94 (之前0.96)")
     logger.info(f"  R的当期缩放: 0.85 * v^2")
     

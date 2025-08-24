@@ -37,17 +37,18 @@
 - 计算创新方差：S = x²*P + R
 - 计算标准化创新：z = v/√S（不使用滚动窗口）
 - z方差保持在[0.8, 1.3]带宽内
+- **重要**：z必须是创新标准化，不是残差滚动窗口标准化
 
-### Story 3.3: Z-score信号生成
+### Story 3.3: 基于创新标准化的信号生成
 **作为**研究员  
-**我希望**基于标准化创新(z-score)生成开平仓信号  
+**我希望**基于创新标准化z生成开平仓信号  
 **以便**捕捉均值回归机会
 
 **验收标准:**
-- 使用Story 3.2的标准化创新z = v/√S
-- 设定开仓阈值(±2.0)
-- 设定平仓阈值(±0.5)
-- 生成明确的交易信号
+- 使用创新标准化：z = v/√S，其中v = y - β*x，S = x²*P + R
+- 设定开仓阈值：|z| > 2.0
+- 设定平仓阈值：|z| < 0.5
+- 生成明确的交易信号状态
 
 ### Story 3.4: 批量配对处理
 **作为**研究员  
@@ -70,7 +71,7 @@
 | REQ-3.1.2 | 观测方程：y_t = β_t * x_t + v_t | P0 |
 | REQ-3.1.3 | OLS预热：60日窗口估计初始β和残差方差 | P0 |
 | REQ-3.1.4 | R自适应：R_t = λ*R_{t-1} + (1-λ)*ε_t²，λ=0.96（日频） | P0 |
-| REQ-3.1.5 | 折扣实现：P^- = P/δ，等价于Q=(1/δ-1)*P | P0 |
+| REQ-3.1.5 | 折扣实现：P^- = P/δ（只暴露δ，不配置Q） | P0 |
 | REQ-3.1.6 | 初始δ：全局δ_β=0.98，每个配对可独立调整 | P0 |
 | REQ-3.1.7 | 边界保护：β ∈ [-4, 4]，超出则限制 | P0 |
 | REQ-3.1.8 | 异常日处理：换月/公告日"只预测不更新" | P1 |
@@ -82,7 +83,7 @@
 |---|---|---|
 | REQ-3.2.1 | 校准周期：每周或双周执行一次 | P0 |
 | REQ-3.2.2 | 校准窗口：最近60根K线 | P0 |
-| REQ-3.2.3 | z方差计算：v = Var(z_scores[-60:]) | P0 |
+| REQ-3.2.3 | z方差计算：v = Var(z_scores[-60:])，z为创新标准化 | P0 |
 | REQ-3.2.4 | δ调整规则：v>1.3则δ-=0.01，v<0.8则δ+=0.01 | P0 |
 | REQ-3.2.5 | δ边界：δ ∈ [0.95, 0.995] | P0 |
 | REQ-3.2.6 | 调整步长：固定0.01，温和调整 | P0 |
@@ -91,10 +92,10 @@
 ### REQ-3.3: 信号生成逻辑
 | ID | 需求描述 | 优先级 |
 |---|---|---|
-| REQ-3.3.1 | 开仓阈值：|z| > 2.0（全局统一，可配置） | P0 |
-| REQ-3.3.2 | 平仓阈值：|z| < 0.5（全局统一，可配置） | P0 |
+| REQ-3.3.1 | 开仓阈值：|z| > 2.0，z为创新标准化 | P0 |
+| REQ-3.3.2 | 平仓阈值：|z| < 0.5，z为创新标准化 | P0 |
 | REQ-3.3.3 | 持仓限制：最大持仓30天（可配置） | P0 |
-| REQ-3.3.4 | 信号类型：open_long, open_short, close, hold | P0 |
+| REQ-3.3.4 | 信号类型：open_long, open_short, holding_long, holding_short, close, empty | P0 |
 | REQ-3.3.5 | 防重复开仓：同配对同方向不重复开仓 | P0 |
 | REQ-3.3.6 | 信号优先级：强制平仓 > 平仓 > 开仓 | P0 |
 
@@ -180,8 +181,8 @@ class AdaptiveKalmanFilter:
     'pair': 'AG-NI',               # 与协整模块格式一致：纯符号，无后缀
     'symbol_x': 'AG',              # X品种（低波动）
     'symbol_y': 'NI',              # Y品种（高波动）
-    'signal': 'open_long',          # converging, open_long, open_short, close, empty, holding_long, holding_short
-    'z_score': -2.15,               # 标准化创新 z = v/√S
+    'signal': 'open_long',          # open_long, open_short, holding_long, holding_short, close, empty
+    'z_score': -2.15,               # 创新标准化 z = v/√S，其中S = x²*P + R
     'innovation': -0.0234,          # 当前创新值 v = y - β*x
     'beta': 0.8523,                 # 当前β值
     'beta_initial': 0.8234,         # 初始β值（从协整模块获取）
@@ -315,17 +316,31 @@ class AdaptiveKalmanFilter:
         self.beta_history = []
         
     def warm_up_ols(self, x_data, y_data, window=60):
-        """OLS预热获得初始参数"""
-        # OLS回归估计初始β
-        reg = LinearRegression()
-        reg.fit(x_data[:window].reshape(-1, 1), y_data[:window])
+        """OLS预热获得初始参数（使用去中心化数据）"""
+        # 去中心化处理（关键：避免截距问题导致R膨胀）
+        mu_x = np.mean(x_data[:window])
+        mu_y = np.mean(y_data[:window])
+        x_use = x_data[:window] - mu_x
+        y_use = y_data[:window] - mu_y
+        
+        # OLS回归估计初始β（基于去中心化数据）
+        reg = LinearRegression(fit_intercept=False)  # 不需要截距
+        reg.fit(x_use.reshape(-1, 1), y_use)
         
         self.beta = reg.coef_[0]
-        innovations = y_data[:window] - reg.predict(x_data[:window].reshape(-1, 1))
-        self.R = np.var(innovations)  # 初始R为创新方差
-        self.P = self.R / (np.mean(x_data[:window])**2) * 0.1  # 初始P
+        innovations = y_use - reg.predict(x_use.reshape(-1, 1))
+        self.R = np.var(innovations, ddof=1)  # 初始R为创新方差
         
-        return {'beta': self.beta, 'R': self.R, 'P': self.P}
+        # P0初始化：使用Var(x)标定，不再乘0.1
+        x_var = np.var(x_use, ddof=1)
+        self.P = self.R / max(x_var, 1e-12)  # 让x²*P与R同量级
+        
+        # 保存均值用于后续去中心化
+        self.mu_x = mu_x
+        self.mu_y = mu_y
+        
+        return {'beta': self.beta, 'R': self.R, 'P': self.P, 
+                'mu_x': mu_x, 'mu_y': mu_y}
         
     def update(self, y_t, x_t):
         """
@@ -346,7 +361,7 @@ class AdaptiveKalmanFilter:
         S = x_t * P_prior * x_t + self.R
         S = max(S, 1e-12)  # 数值稳定性
         
-        # 4. 标准化创新（不使用滚动窗口）
+        # 4. 创新标准化 z = v/√S（关键：不是滚动窗口标准化）
         z = v / np.sqrt(S)
         
         # 5. Kalman增益
@@ -371,9 +386,9 @@ class AdaptiveKalmanFilter:
         
         return {
             'beta': self.beta,
-            'v': v,      # 创新
-            'S': S,      # 创新方差
-            'z': z,      # 标准化创新
+            'v': v,      # 创新 v = y - β*x
+            'S': S,      # 创新方差 S = x²*P + R
+            'z': z,      # 创新标准化 z = v/√S
             'R': self.R,
             'K': K
         }
