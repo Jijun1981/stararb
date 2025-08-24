@@ -24,8 +24,8 @@ class AdaptiveKalmanFilter:
     
     def __init__(self, 
                  pair_name: str,
-                 delta: float = 0.96,      # 优化后: δ=0.96 (突破性发现!)
-                 lambda_r: float = 0.92,    # 优化后: λ=0.92
+                 delta: float = 0.93,      # 优化参数: δ=0.93 (平稳性优先)
+                 lambda_r: float = 0.89,    # 优化参数: λ=0.89 (平稳性优先)
                  beta_bounds: Optional[Tuple[float, float]] = None):  # 移除β边界限制
         """
         初始化自适应Kalman滤波器
@@ -355,12 +355,12 @@ class AdaptiveSignalGenerator:
         kf = AdaptiveKalmanFilter(pair_name)
         self.pair_filters[pair_name] = kf
         
-        # OLS预热
+        # OLS预热 - REQ-3.1.3: 60日窗口估计初始β
         kf.warm_up_ols(x_aligned, y_aligned, self.ols_window)
         
-        # 如果提供了initial_beta，可以用它调整（但保持R和P的OLS估计）
-        if initial_beta is not None:
-            kf.beta = initial_beta
+        # 注释掉β覆盖逻辑：让OLS预热自己估计初始β，符合REQ-3.1.3要求
+        # if initial_beta is not None:
+        #     kf.beta = initial_beta
         
         signals = []
         position = None
