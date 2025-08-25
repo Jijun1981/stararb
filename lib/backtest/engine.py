@@ -158,8 +158,9 @@ class BacktestEngine:
             pnl_data = self.risk_manager.calculate_unrealized_pnl(position, pair_prices)
             current_pnl = pnl_data['net_pnl']
             
-            # 获取分配的资金（使用配置的仓位权重）
-            allocated_capital = self.initial_capital * self.config.sizing_config.position_weight
+            # 使用持仓实际分配的资金
+            allocated_capital = getattr(position, 'allocated_capital', 
+                                      self.initial_capital * self.config.sizing_config.position_weight)
             
             # 检查止损
             should_stop, stop_reason = self.risk_manager.check_stop_loss(

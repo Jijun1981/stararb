@@ -78,15 +78,34 @@ class RiskManager:
         price_change_x = current_prices['x'] - position.open_price_x
         price_change_y = current_prices['y'] - position.open_price_y
         
-        # 计算各腿盈亏
-        if position.direction == 'long':
-            # 做多配对：买X卖Y
-            pnl_x = price_change_x * position.lots_x * multipliers['x']
-            pnl_y = -price_change_y * position.lots_y * multipliers['y']
-        else:
-            # 做空配对：卖X买Y
-            pnl_x = -price_change_x * position.lots_x * multipliers['x']
-            pnl_y = price_change_y * position.lots_y * multipliers['y']
+        # 计算各腿盈亏 - 根据Beta符号和方向确定
+        # REQ-4.2.2.4: 核心：正确计算PnL，考虑Beta符号
+        
+        # 需要从position获取beta值
+        beta = getattr(position, 'beta', 1.0)  # 默认正Beta
+        
+        if beta > 0:  # 正Beta
+            if position.direction == 'long':
+                # REQ-4.2.1.4: 正Beta + Long = 买Y卖X
+                # REQ-4.2.2.5: pnl_x = -lots_x × (close_x - open_x) × multiplier_x
+                # REQ-4.2.2.6: pnl_y = lots_y × (close_y - open_y) × multiplier_y
+                pnl_x = -price_change_x * position.lots_x * multipliers['x']  # 卖X
+                pnl_y = price_change_y * position.lots_y * multipliers['y']   # 买Y
+            else:  # short
+                # REQ-4.2.1.5: 正Beta + Short = 卖Y买X
+                pnl_x = price_change_x * position.lots_x * multipliers['x']   # 买X
+                pnl_y = -price_change_y * position.lots_y * multipliers['y']  # 卖Y
+        else:  # 负Beta
+            if position.direction == 'long':
+                # REQ-4.2.1.6: 负Beta + Long = 买Y买X（同向）
+                # REQ-4.2.2.7: pnl_x = lots_x × (close_x - open_x) × multiplier_x
+                # REQ-4.2.2.8: pnl_y = lots_y × (close_y - open_y) × multiplier_y
+                pnl_x = price_change_x * position.lots_x * multipliers['x']   # 买X
+                pnl_y = price_change_y * position.lots_y * multipliers['y']   # 买Y
+            else:  # short
+                # REQ-4.2.1.7: 负Beta + Short = 卖Y卖X（同向）
+                pnl_x = -price_change_x * position.lots_x * multipliers['x']  # 卖X
+                pnl_y = -price_change_y * position.lots_y * multipliers['y']  # 卖Y
         
         gross_pnl = pnl_x + pnl_y
         

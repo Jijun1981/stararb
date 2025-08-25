@@ -1,0 +1,154 @@
+# 端到端配对交易流水线测试配置文件
+# 版本: TEST-V1.0
+# 用于快速测试完整流程
+
+# ==============================================================================
+# 全局配置
+# ==============================================================================
+pipeline:
+  version: "TEST-1.0"
+  name: "端到端配对交易流水线(测试版)"
+  description: "测试完整流程"
+  
+# ==============================================================================
+# 时间配置 - 测试用更短时间
+# ==============================================================================
+time_config:
+  data_start_date: "2020-01-02"
+  data_end_date: "2025-08-20"
+  
+  # 信号生成时间线 - 测试用短期
+  ols_training_start: "2024-05-01"      
+  ols_training_end: "2024-05-30"        
+  kalman_warmup_start: "2024-06-01"     
+  kalman_warmup_end: "2024-06-15"       # 缩短预热期
+  signal_generation_start: "2024-06-16" # 提前开始信号期
+  signal_generation_end: "2024-07-15"   # 缩短信号期
+  
+  backtest_start: "2024-06-16"          
+  backtest_end: "2024-07-15"            
+
+# ==============================================================================
+# 品种配置
+# ==============================================================================
+symbols:
+  metals:
+    precious: ["AG", "AU"]                          
+    nonferrous: ["AL", "CU", "NI", "PB", "SN", "ZN"]    
+    ferrous: ["HC", "I", "RB", "SF", "SM", "SS"]         
+
+# ==============================================================================
+# 协整配对筛选配置 - 使用宽松条件快速测试
+# ==============================================================================
+cointegration:
+  screening_windows: ["1y", "2y"]   # 减少窗口数量
+  p_value_threshold: 0.05          
+  filter_logic: "AND"              
+  
+  enable_halflife_filter: false     
+  enable_beta_filter: false        
+  enable_r2_filter: false          
+  
+  sort_by: "pvalue_1y"             
+  export_results: true
+
+# ==============================================================================
+# 信号生成配置 - 测试用宽松阈值
+# ==============================================================================
+signal_generation:
+  ols_window: 30                    # 缩短OLS窗口
+  kalman_warmup: 15                 # 缩短Kalman预热
+  
+  kalman_params:
+    Q_beta: 5.0e-6                  
+    Q_alpha: 1.0e-5                 
+    R_init: 0.005                   
+    R_adapt: true                   
+  
+  signal_thresholds:
+    z_open: 1.5                     # 降低阈值便于测试
+    z_close: 0.3                    
+    max_holding_days: 15            # 缩短最大持仓
+  
+  enable_beta_bounds: false         
+  z_score_type: "innovation"        
+
+# ==============================================================================
+# 回测配置
+# ==============================================================================
+backtest:
+  capital_management:
+    initial_capital: 1000000        # 100万测试资金
+    position_weight: 0.10           # 10%仓位便于测试
+    margin_rate: 0.12               
+  
+  trading_costs:
+    commission_rate: 0.0003         
+    slippage_ticks: 3               
+  
+  risk_management:
+    stop_loss_pct: 0.30             
+    max_holding_days: 15            
+    enable_stop_loss: true          
+    enable_time_stop: true          
+    max_concurrent_positions: null  
+  
+  position_sizing:
+    max_denominator: 10             
+    min_lots: 1                     
+    max_lots_per_leg: 20            # 限制手数便于测试
+  
+  execution:
+    allow_multiple_positions: false 
+    force_close_at_end: true        
+
+# ==============================================================================
+# 合约规格配置（简化版）
+# ==============================================================================
+contract_specs:
+  AG: {multiplier: 15, tick_size: 1}
+  AU: {multiplier: 1000, tick_size: 0.01}
+  AL: {multiplier: 5, tick_size: 5}
+  CU: {multiplier: 5, tick_size: 10}
+  NI: {multiplier: 1, tick_size: 10}
+  PB: {multiplier: 5, tick_size: 5}
+  SN: {multiplier: 1, tick_size: 10}
+  ZN: {multiplier: 5, tick_size: 5}
+  HC: {multiplier: 10, tick_size: 1}
+  I:  {multiplier: 100, tick_size: 0.5}
+  RB: {multiplier: 10, tick_size: 1}
+  SF: {multiplier: 5, tick_size: 2}
+  SM: {multiplier: 5, tick_size: 2}
+  SS: {multiplier: 5, tick_size: 5}
+
+# ==============================================================================
+# 输出配置
+# ==============================================================================
+output:
+  base_dir: "output/test"
+  subdirs:
+    signals: "signals"
+    backtest: "backtest" 
+    reports: "reports"
+    analysis: "analysis"
+  
+  file_naming:
+    timestamp_format: "%Y%m%d_%H%M%S"
+    include_config_hash: false
+  
+  save_options:
+    save_signals: true
+    save_trades: true
+    save_positions: true
+    save_equity_curve: true
+    save_pair_metrics: true
+    save_risk_stats: true
+
+# ==============================================================================
+# 日志配置
+# ==============================================================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  save_to_file: false
+  log_dir: "logs"
