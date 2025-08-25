@@ -1,0 +1,177 @@
+# 端到端配对交易流水线配置文件
+# 版本: V1.0
+# 创建日期: 2025-08-25
+
+# ==============================================================================
+# 全局配置
+# ==============================================================================
+pipeline:
+  version: "1.0"
+  name: "端到端配对交易流水线"
+  description: "1-5年全协整配对的完整交易流程"
+  
+# ==============================================================================
+# 时间配置
+# ==============================================================================
+time_config:
+  # 数据范围
+  data_start_date: "2020-01-02"
+  data_end_date: "2025-08-20"
+  
+  # 信号生成时间线
+  ols_training_start: "2024-04-02"      # OLS训练期开始（往前60天）
+  ols_training_end: "2024-05-31"        # OLS训练期结束
+  kalman_warmup_start: "2024-06-01"     # Kalman预热期开始
+  kalman_warmup_end: "2024-06-30"       # Kalman预热期结束（30天）
+  signal_generation_start: "2024-07-01" # 信号生成期开始
+  signal_generation_end: "2025-08-20"   # 信号生成期结束（最新日期）
+  
+  # 回测时间
+  backtest_start: "2024-07-01"          # 回测开始
+  backtest_end: "2025-08-20"            # 回测结束
+
+# ==============================================================================
+# 品种配置
+# ==============================================================================
+symbols:
+  # 14个金属期货品种
+  metals:
+    precious: ["AG", "AU"]                                    # 贵金属：银、金
+    nonferrous: ["AL", "CU", "NI", "PB", "SN", "ZN"]        # 有色：铝、铜、镍、铅、锡、锌
+    ferrous: ["HC", "I", "RB", "SF", "SM", "SS"]             # 黑色：热卷、铁矿、螺纹、硅铁、锰硅、不锈钢
+
+# ==============================================================================
+# 协整配对筛选配置
+# ==============================================================================
+cointegration:
+  # 筛选条件（必须全部满足）
+  screening_windows: ["1y", "2y", "3y", "4y", "5y"]
+  p_value_threshold: 0.05                 # 所有窗口的p值都要 < 0.05
+  filter_logic: "AND"                     # 必须全部满足
+  
+  # 不筛选的条件
+  enable_halflife_filter: false           # 不限制半衰期
+  enable_beta_filter: false               # 不限制Beta范围
+  enable_r2_filter: false                 # 不限制R²
+  
+  # 输出配置
+  sort_by: "pvalue_1y"                    # 按1年p值排序
+  export_results: true
+
+# ==============================================================================
+# 信号生成配置
+# ==============================================================================
+signal_generation:
+  # 时间窗口参数
+  ols_window: 60                          # OLS训练窗口（天）
+  kalman_warmup: 30                       # Kalman预热期（天）
+  
+  # Kalman滤波器参数（实证最优值）
+  kalman_params:
+    Q_beta: 5.0e-6                        # Beta过程噪声
+    Q_alpha: 1.0e-5                       # Alpha过程噪声
+    R_init: 0.005                         # 初始测量噪声
+    R_adapt: true                         # 自适应调整R
+  
+  # 信号阈值
+  signal_thresholds:
+    z_open: 2.0                           # 开仓阈值：|Z| > 2.0
+    z_close: 0.5                          # 平仓阈值：|Z| < 0.5
+    max_holding_days: 30                  # 最大持仓天数
+  
+  # 其他配置
+  enable_beta_bounds: false               # 不限制Beta范围
+  z_score_type: "innovation"              # 使用innovation z-score
+
+# ==============================================================================
+# 回测配置
+# ==============================================================================
+backtest:
+  # 资金管理
+  capital_management:
+    initial_capital: 5000000              # 初始资金：500万元
+    position_weight: 0.05                 # 每配对仓位权重：5%
+    margin_rate: 0.12                     # 保证金率：12%
+  
+  # 交易成本
+  trading_costs:
+    commission_rate: 0.0003               # 手续费率：万分之3（单边）
+    slippage_ticks: 3                     # 滑点：单边3个tick
+  
+  # 风险控制
+  risk_management:
+    stop_loss_pct: 0.30                   # 止损比例：30%（相对保证金）
+    max_holding_days: 30                  # 最大持仓：30天
+    enable_stop_loss: true                # 启用止损
+    enable_time_stop: true                # 启用时间止损
+    max_concurrent_positions: null        # 最大同时持仓数：无限制
+  
+  # 手数计算
+  position_sizing:
+    max_denominator: 10                   # 最大分母（用于比例计算）
+    min_lots: 1                          # 最小手数
+    max_lots_per_leg: 100                # 每腿最大手数
+  
+  # 执行控制
+  execution:
+    allow_multiple_positions: false       # 同一配对不允许多个持仓
+    force_close_at_end: true             # 回测结束强制平仓
+
+# ==============================================================================
+# 合约规格配置
+# ==============================================================================
+contract_specs:
+  # 贵金属
+  AG: {multiplier: 15, tick_size: 1}      # 白银：15kg/手，1元/吨
+  AU: {multiplier: 1000, tick_size: 0.01} # 黄金：1000g/手，0.01元/g
+  
+  # 有色金属  
+  AL: {multiplier: 5, tick_size: 5}       # 铝：5吨/手，5元/吨
+  CU: {multiplier: 5, tick_size: 10}      # 铜：5吨/手，10元/吨
+  NI: {multiplier: 1, tick_size: 10}      # 镍：1吨/手，10元/吨
+  PB: {multiplier: 5, tick_size: 5}       # 铅：5吨/手，5元/吨
+  SN: {multiplier: 1, tick_size: 10}      # 锡：1吨/手，10元/吨
+  ZN: {multiplier: 5, tick_size: 5}       # 锌：5吨/手，5元/吨
+  
+  # 黑色系
+  HC: {multiplier: 10, tick_size: 1}      # 热卷：10吨/手，1元/吨
+  I:  {multiplier: 100, tick_size: 0.5}   # 铁矿：100吨/手，0.5元/吨
+  RB: {multiplier: 10, tick_size: 1}      # 螺纹：10吨/手，1元/吨
+  SF: {multiplier: 5, tick_size: 2}       # 硅铁：5吨/手，2元/吨
+  SM: {multiplier: 5, tick_size: 2}       # 锰硅：5吨/手，2元/吨
+  SS: {multiplier: 5, tick_size: 5}       # 不锈钢：5吨/手，5元/吨
+
+# ==============================================================================
+# 输出配置
+# ==============================================================================
+output:
+  # 输出目录
+  base_dir: "output"
+  subdirs:
+    signals: "signals"
+    backtest: "backtest"
+    reports: "reports"
+    analysis: "analysis"
+  
+  # 文件命名
+  file_naming:
+    timestamp_format: "%Y%m%d_%H%M%S"
+    include_config_hash: false
+  
+  # 保存选项
+  save_options:
+    save_signals: true
+    save_trades: true
+    save_positions: true
+    save_equity_curve: true
+    save_pair_metrics: true
+    save_risk_stats: true
+
+# ==============================================================================
+# 日志配置
+# ==============================================================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  save_to_file: true
+  log_dir: "logs"

@@ -20,8 +20,11 @@ from statsmodels.tsa.stattools import adfuller
 # 添加项目路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+sys.path.append('/mnt/e/Star-arb/scripts/kalman')
+sys.path.append('/mnt/e/Star-arb/lib')
+
 from kalman_original_version import OriginalKalmanFilter
-from lib.data import load_all_symbols_data
+from data import load_all_symbols_data
 
 # 设置日志
 logging.basicConfig(

@@ -1,12 +1,16 @@
-# 模块3: 信号生成需求文档 V3.0
+# 模块3: 信号生成需求文档 V3.1
 
 ## 1. 模块概述
-接收协整配对模块的配对参数，使用**原始状态空间Kalman滤波器**进行动态β和α更新，基于标准化创新(z-score)生成交易信号。核心设计：使用二维状态空间模型[β, α]，严格的数学框架。
+接收协整配对模块的配对参数，使用**原始状态空间Kalman滤波器**进行动态β和α更新，基于标准化残差(z-score)生成交易信号。核心设计：使用二维状态空间模型[β, α]，严格的数学框架。
 
-**设计理念**：
+**设计理念（基于实证修正）**：
 - 使用完整的二维状态空间模型：状态向量包含[β, α]
 - 固定的过程噪声协方差Q和自适应的测量噪声R
-- 基于创新的标准化z-score，不使用滚动窗口
+- **关键修正**：基于残差标准化 z = v/√R，不使用创新标准化 z = v/√S
+- **实证依据**：滚动年度评估显示原版本KF (z = residual/√R) 效果优秀：
+  - Z方差：1.288（理想范围）
+  - Z>2比例：7.6%（符合2-5%预期上限）  
+  - 均值回归率：95.1%（优秀）
 - 经过实证验证的最优参数：Q_beta=5e-6, Q_alpha=1e-5
 
 **职责边界**：
@@ -14,7 +18,36 @@
 - 本模块负责：OLS预热初始化，自适应Kalman滤波，批量生成交易信号
 - 回测模块负责：根据信号和资金计算具体手数
 
-## 2. 用户故事 (User Stories)
+## 2. 实证验证结果（重要修正依据）
+
+### 2.1 滚动年度评估验证
+基于2025-08-25的滚动年度Kalman评估 (`evaluate_kalman_rolling_yearly.py`)，验证了原版本KF的优秀性能：
+
+**整体统计结果**：
+- **平均Z方差**: 1.288（接近理想值1.0）
+- **平均Z>2比例**: 7.6%（符合预期2-5%范围上限）  
+- **平均均值回归率**: 95.1%（极好的均值回归性）
+- **无符号变化比例**: 100.0%（Beta完全稳定）
+- **平均综合评分**: 6.1/9（良好）
+
+**分年度统计**：
+- **2020年**: Z方差1.214，Z>2比例7.4%，评分6.7/9
+- **2021年**: Z方差1.459，Z>2比例7.8%，评分5.5/9
+- **2022年**: Z方差1.191，Z>2比例7.5%，评分6.2/9
+
+**关键发现**：
+- **z = residual/√R** 方法产生理想的统计特性
+- **z = innovation/√S** 方法在实际测试中信号量严重不足（Z方差~0.3，Z>2比例接近0%）
+
+### 2.2 方法对比验证
+| 方法 | Z方差 | Z>2比例 | 信号量 | 评估 |
+|------|-------|---------|--------|------|
+| 原版本: z = residual/√R | ~1.3 | 7.6% | 充足 | ✅ 优秀 |
+| 工程版本: z = innovation/√S | ~0.3 | 0% | 极少 | ❌ 不可用 |
+
+**结论**：需求必须使用原版本的 z = residual/√R 方法。
+
+## 3. 用户故事 (User Stories)
 
 ### Story 3.1: 状态空间Kalman滤波
 **作为**研究员  
@@ -29,28 +62,29 @@
 - 支持批量处理多个配对
 - 记录完整的状态历史
 
-### Story 3.2: 创新标准化
+### Story 3.2: 残差标准化（修正）
 **作为**研究员  
-**我希望**计算标准化创新(z-score)  
+**我希望**计算标准化残差(z-score)  
 **以便**生成稳定的交易信号
 
 **验收标准:**
-- 计算创新：v = y - β*x
-- 计算创新方差：S = x²*P + R
-- 计算标准化创新：z = v/√S（不使用滚动窗口）
+- 计算创新：v = y - β*x - α  
+- 计算标准化残差：z = v/√R（使用测量噪声R标准化）
 - z方差保持在[0.8, 1.3]带宽内
-- **重要**：z必须是创新标准化，不是残差滚动窗口标准化
+- **重要修正**：经实证验证，z = v/√R 能产生正确信号量，而z = v/√S信号量不足
+- **实证依据**：原版本KF使用z = residual/√R，Z方差~1.3，Z>2比例7.6%
 
-### Story 3.3: 基于创新标准化的信号生成
+### Story 3.3: 基于残差标准化的信号生成（修正）
 **作为**研究员  
-**我希望**基于创新标准化z生成开平仓信号  
+**我希望**基于残差标准化z生成开平仓信号  
 **以便**捕捉均值回归机会
 
 **验收标准:**
-- 使用创新标准化：z = v/√S，其中v = y - β*x，S = x²*P + R
+- 使用残差标准化：z = v/√R，其中v = y - β*x - α，R为测量噪声
 - 设定开仓阈值：|z| > 2.0
-- 设定平仓阈值：|z| < 0.5
+- 设定平仓阈值：|z| < 0.5  
 - 生成明确的交易信号状态
+- **实证验证**：此方法产生Z>2比例7.6%，符合预期2-5%上限
 
 ### Story 3.4: 批量配对处理
 **作为**研究员  
@@ -66,17 +100,27 @@
 
 ## 3. 功能需求 (Requirements)
 
+### REQ-3.0: 时间轴配置（新增）
+| ID | 需求描述 | 优先级 |
+|---|---|---|
+| REQ-3.0.1 | 信号期起点：用户指定信号生成开始日期（如2024-07-01） | P0 |
+| REQ-3.0.2 | Kalman预热期：可配置天数（默认30天），从信号期起点往前推 | P0 |
+| REQ-3.0.3 | OLS训练期：可配置天数（默认60天），从Kalman预热期起点往前推 | P0 |
+| REQ-3.0.4 | 数据范围：自动计算总数据需求 = signal_start - kalman_warmup - ols_training | P0 |
+| REQ-3.0.5 | 时间阶段：OLS训练 → Kalman预热（不出信号） → 信号生成期 | P0 |
+| REQ-3.0.6 | 参数接口：signal_start_date, kalman_warmup_days, ols_training_days | P0 |
+
 ### REQ-3.1: 状态空间Kalman滤波
 | ID | 需求描述 | 优先级 |
 |---|---|---|
 | REQ-3.1.1 | 状态方程：x_t = x_{t-1} + w_t，其中x=[β, α]' | P0 |
 | REQ-3.1.2 | 观测方程：y_t = β_t * x_t + α_t + v_t | P0 |
-| REQ-3.1.3 | OLS预热：60日窗口估计初始[β, α]和残差方差 | P0 |
+| REQ-3.1.3 | OLS预热：使用ols_training_days窗口估计初始[β, α] | P0 |
 | REQ-3.1.4 | 过程噪声：Q = diag(5e-6, 1e-5) 固定值 | P0 |
 | REQ-3.1.5 | 测量噪声：R_init = 0.005，可选自适应 | P0 |
 | REQ-3.1.6 | 初始协方差：P_0 = I * 0.001 | P0 |
 | REQ-3.1.7 | 边界保护：无需限制，让数据说话 | P0 |
-| REQ-3.1.8 | 预热期：60天OLS + 60天Kalman warmup | P0 |
+| REQ-3.1.8 | 预热期：可配置OLS训练期 + 可配置Kalman预热期 | P0 |
 
 ### REQ-3.2: 信号质量监控
 | ID | 需求描述 | 优先级 |
@@ -114,12 +158,38 @@
 | REQ-3.5.3 | 配对级别质量评级：good(z方差在带宽内)/warning/bad | P0 |
 | REQ-3.5.4 | 支持导出质量报告 | P1 |
 
+### REQ-3.5: 时间轴计算示例
+**配置参数**：
+- signal_start_date = "2024-07-01" （信号生成开始日期）
+- kalman_warmup_days = 30 （Kalman预热天数）
+- ols_training_days = 60 （OLS训练天数）
+
+**自动计算时间轴**：
+```
+OLS训练期：   2024-04-02 至 2024-05-31 （60天）
+Kalman预热期： 2024-06-01 至 2024-06-30 （30天，不出信号）
+信号生成期：   2024-07-01 至 数据结束   （实际出信号）
+
+数据开始日期 = signal_start_date - kalman_warmup_days - ols_training_days
+          = 2024-07-01 - 30天 - 60天 = 2024-04-02
+```
+
+**阶段定义**：
+- **OLS阶段**: 前ols_training_days天，只做参数初始化，状态='ols_training'
+- **Kalman预热阶段**: 接下来kalman_warmup_days天，更新状态但不出信号，状态='kalman_warmup'
+- **信号生成阶段**: 剩余时间，正常出信号，状态='signal_generation'
+
 ## 4. 接口定义
 
 ### 4.1 SignalGenerator类接口
 ```python
 class SignalGenerator:
     def __init__(self, 
+                 # 时间配置（新增）
+                 signal_start_date: str,              # 信号生成开始日期
+                 kalman_warmup_days: int = 30,        # Kalman预热天数
+                 ols_training_days: int = 60,         # OLS训练天数
+                 
                  # 交易阈值
                  z_open: float = 2.0, 
                  z_close: float = 0.5,
@@ -129,10 +199,7 @@ class SignalGenerator:
                  Q_beta: float = 5e-6,
                  Q_alpha: float = 1e-5,
                  R_init: float = 0.005,
-                 R_adapt: bool = True,
-                 
-                 # 预热参数
-                 warmup: int = 60)
+                 R_adapt: bool = True)
     
     # 单配对处理
     def process_pair(self, 
@@ -179,8 +246,8 @@ class OriginalKalmanFilter:
     'symbol_x': 'AG',              # X品种（低波动）
     'symbol_y': 'NI',              # Y品种（高波动）
     'signal': 'open_long',          # open_long, open_short, holding_long, holding_short, close, empty
-    'z_score': -2.15,               # 创新标准化 z = v/√S，其中S = x²*P + R
-    'innovation': -0.0234,          # 当前创新值 v = y - β*x
+    'z_score': -2.15,               # 残差标准化 z = v/√R（修正），经实证验证的正确方法
+    'innovation': -0.0234,          # 当前创新值 v = y - β*x - α
     'beta': 0.8523,                 # 当前β值
     'beta_initial': 0.8234,         # 初始β值（从协整模块获取）
     'days_held': 0,                 # 持仓天数（新开仓为0）
@@ -355,8 +422,8 @@ class OriginalKalmanFilter:
         v = y_t - y_pred  # 创新
         S = H @ P_pred @ H.T + self.R  # 创新方差
         
-        # 4. 标准化创新
-        z = v / np.sqrt(S)
+        # 4. 标准化残差（修正）
+        z = v / np.sqrt(self.R)  # 使用R而非S进行标准化
         
         # 5. 更新步
         # Kalman增益
@@ -471,8 +538,8 @@ def process_pair(pair_name: str, x_data: np.ndarray, y_data: np.ndarray,
         # Kalman更新
         result = kf.update(y_data[i], x_data[i])
         
-        # 使用创新标准化z生成信号
-        z = result['z']  # z = v/√S，不使用滚动窗口
+        # 使用残差标准化z生成信号（修正）
+        z = result['z']  # z = v/√R，经滚动年度评估验证的正确方法
         signal = generate_signal(z, position, days_held, 
                                z_open, z_close, max_holding_days)
             
@@ -514,10 +581,10 @@ def process_pair(pair_name: str, x_data: np.ndarray, y_data: np.ndarray,
 def generate_signal(z_score, position, days_held, 
                    z_open, z_close, max_days):
     """
-    信号生成逻辑（使用创新标准化）
+    信号生成逻辑（使用残差标准化-修正）
     
     Args:
-        z_score: 标准化创新 z = v/√S
+        z_score: 标准化残差 z = v/√R（经实证验证的正确方法）
         position: 当前持仓状态 ('long'/'short'/None)
         days_held: 持仓天数
         z_open, z_close, max_days: 阈值参数

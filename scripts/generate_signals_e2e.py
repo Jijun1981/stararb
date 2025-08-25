@@ -20,7 +20,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.data import load_all_symbols_data
 from lib.coint import CointegrationAnalyzer
-from lib.signal_generation import AdaptiveSignalGenerator
 
 # 设置日志
 logging.basicConfig(
@@ -129,14 +128,10 @@ def main():
     logger.info("步骤4: 生成交易信号")
     logger.info("=" * 60)
     
-    # 创建信号生成器
-    sg = AdaptiveSignalGenerator(
-        z_open=2.0,              # 开仓阈值
-        z_close=0.5,             # 平仓阈值
-        max_holding_days=30,     # 最大持仓天数
-        calibration_freq=5,      # 校准频率
-        ols_window=ols_window,   # OLS预热窗口
-        warm_up_days=warm_up_days # Kalman预热天数
+    # 创建信号生成器 - 使用正确版本
+    from lib.signal_generation import SignalGeneratorV3
+    sg = SignalGeneratorV3(
+        signal_start_date=signal_start_date
     )
     
     # 使用批量处理
@@ -217,7 +212,8 @@ def main():
         logger.info("\n质量摘要:")
         for _, row in quality_report.iterrows():
             logger.info(f"  {row['pair']}: z_var={row['z_var']:.3f}, "
-                      f"质量={row['quality_status']}, delta={row['current_delta']:.3f}")
+                      f"z_std={row['z_std']:.3f}, z>2比例={row['z_gt2_ratio']:.1%}, "
+                      f"质量={row['quality_status']}")
     else:
         logger.warning("没有生成任何信号")
     
