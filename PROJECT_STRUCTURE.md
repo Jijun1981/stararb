@@ -1,7 +1,7 @@
 # 项目结构规范
 
 ## 更新日期
-2025-08-23
+2025-08-25 (项目结构已重新整理和清理)
 
 ## 目录结构详细说明
 
@@ -21,13 +21,47 @@ Star-arb/                    # 项目根目录
 │   │   ├── convert_jq_to_parquet.py  # 数据格式转换
 │   │   └── update_futures_data.py   # 期货数据更新
 │   │
-│   ├── analysis/           # 分析脚本
-│   │   ├── check_complete_calculation_logic.py
-│   │   ├── compare_screening_modes.py
-│   │   ├── debug_beta_calculation.py
-│   │   ├── run_parameterized_cointegration_screening.py
-│   │   ├── verify_beta_direction.py
-│   │   └── verify_ols_beta_calculation.py
+│   ├── analysis/           # 分析脚本（已清理整理）
+│   │   ├── analyze_beta_tracking.py        # Beta跟踪分析
+│   │   ├── analyze_kalman_residuals.py     # Kalman残差分析
+│   │   ├── analyze_regression_returns.py   # 回归收益分析
+│   │   ├── analyze_symbol_mapping.py       # 符号映射分析
+│   │   ├── check_negative_beta_logic.py    # 负Beta逻辑检查
+│   │   ├── compare_kalman_versions.py      # Kalman版本对比
+│   │   ├── evaluate_all_stable_pairs_yearly.py # 年度配对评估
+│   │   ├── find_stable_pairs.py            # 稳定配对筛选
+│   │   └── verify_requirements_compliance.py # 需求合规验证
+│   │
+│   ├── debug/              # 调试脚本（已清理整理）
+│   │   ├── debug_beta_consistency.py      # Beta一致性调试
+│   │   ├── debug_kalman_investigation.py  # Kalman调试研究
+│   │   ├── debug_signal_analysis.py       # 信号分析调试
+│   │   └── fix_signal_problems.py         # 信号问题修复
+│   │
+│   ├── validation/         # 验证脚本（已清理整理）
+│   │   ├── test_engineering_kalman.py     # 工程Kalman测试
+│   │   ├── test_residual_backtest.py      # 残差回测测试
+│   │   ├── test_residual_zscore.py        # 残差Z-score测试
+│   │   └── test_timeline_backtest.py      # 时间线回测测试
+│   │
+│   ├── signals/            # 信号生成脚本（已重新整理）
+│   │   ├── generate_signals_proper_timeline.py  # 正确时间线信号生成
+│   │   ├── generate_signals_residual.py         # 残差信号生成
+│   │   └── generate_signals_rolling_ols.py      # 滚动OLS信号生成
+│   │
+│   ├── kalman/             # Kalman相关脚本（新分类）
+│   │   ├── kalman_engineering_version.py       # 工程版本Kalman
+│   │   ├── kalman_original_version.py          # 原始版本Kalman
+│   │   └── kalman_improvement_proposal.py      # Kalman改进提案
+│   │
+│   ├── optimization/       # 参数优化脚本（新分类）
+│   │   ├── hyperparameter_optimizer.py        # 超参数优化器
+│   │   ├── optimize_kalman_parameters.py      # Kalman参数优化
+│   │   ├── parameter_optimization_summary.py  # 优化结果总结
+│   │   └── simple_parameter_test.py           # 简单参数测试
+│   │
+│   ├── maintenance/        # 维护脚本（新增）
+│   │   └── cleanup_project_structure.py      # 项目结构清理
 │   │
 │   ├── backtest/           # 回测执行脚本
 │   │   ├── run_backtest_v4.py
@@ -42,32 +76,9 @@ Star-arb/                    # 项目根目录
 │   │   ├── e2e_pipeline.py
 │   │   └── e2e_pipeline_clean.py
 │   │
-│   ├── signals/            # 信号生成脚本
-│   │   ├── generate_ols_rolling_signals.py
-│   │   ├── signal_generation_test.py
-│   │   └── test_with_real_data.py
-│   │
-│   ├── validation/         # 验证和比较脚本
-│   │   ├── compare_backtest_versions.py
-│   │   ├── compare_filtered_sets.py
-│   │   ├── consistency_check.py
-│   │   ├── test_pipeline_v21_calculations.py
-│   │   ├── validate_coint_algorithms.py
-│   │   ├── verify_backtest_algorithms.py
-│   │   ├── verify_cointegration_algorithms.py
-│   │   ├── verify_data_status.py
-│   │   ├── verify_lots_direction.py
-│   │   └── verify_signal_generation_algorithms.py
-│   │
-│   ├── joinquant/          # 聚宽数据获取脚本
-│   │   ├── fetch_8888_data.py
-│   │   └── fetch_jq_data.py
-│   │
-│   └── 其他调试脚本/        # 临时调试和测试脚本
-│       ├── debug_signal_systematic.py
-│       ├── test_complete_pipeline_clear_states.py
-│       ├── debug_backtest_execution.py
-│       └── debug_signal_generation.py
+│   └── joinquant/          # 聚宽数据获取脚本
+│       ├── fetch_8888_data.py
+│       └── fetch_jq_data.py
 │
 ├── notebooks/              # ✅ Jupyter Notebooks - 交互式分析
 │   ├── 00_test_akshare.ipynb           # AkShare接口测试
@@ -128,27 +139,37 @@ Star-arb/                    # 项目根目录
 │   ├── business.yaml      # 业务参数配置
 │   └── contract_specs.json # 合约规格配置
 │
-├── output/                # ❌ 输出结果（不入版本控制）
+├── output/                # ❌ 输出结果（不入版本控制，已清理整理）
+│   ├── analysis/         # 分析结果文件
+│   │   ├── quality_report_*.csv     # 质量报告
+│   │   ├── all_stable_pairs_*.csv   # 稳定配对分析
+│   │   └── beta_evolution_*.csv     # Beta演化分析
+│   │
+│   ├── backtest/         # 回测结果文件
+│   │   ├── backtest_equity_*.csv    # 权益曲线
+│   │   ├── backtest_trades_*.csv    # 交易记录
+│   │   ├── backtest_metrics_*.csv   # 回测指标
+│   │   └── backtest_pairs_*.csv     # 配对表现
+│   │
+│   ├── signals/          # 信号生成结果
+│   │   ├── signals_e2e_*.csv        # 端到端信号
+│   │   ├── signals_residual_*.csv   # 残差信号
+│   │   └── signals_rolling_*.csv    # 滚动信号
+│   │
+│   ├── kalman_analysis/  # Kalman滤波分析结果
+│   │   ├── kalman_grid_search_*.csv       # 网格搜索结果
+│   │   ├── kalman_yearly_evaluation_*.csv # 年度评估
+│   │   └── kalman_version_comparison_*.csv # 版本对比
+│   │
 │   ├── cointegration/    # 协整分析结果
-│   │   ├── verification/  # 算法验证结果
-│   │   └── results/      # 配对筛选结果
+│   │   └── cointegration_results.csv     # 主要协整结果
 │   │
-│   ├── backtest/         # 回测结果
-│   │   ├── equity_*.csv        # 权益曲线
-│   │   └── trades_*.csv        # 交易记录
+│   ├── plots/            # 图表文件
+│   │   ├── *.png                    # 各种分析图表
+│   │   └── kalman_comparison_*.png  # Kalman对比图
 │   │
-│   ├── pipeline_v21/     # V2.1流程输出
-│   │   ├── cointegrated_pairs_*.csv # 协整配对
-│   │   ├── signals_*.csv           # 信号记录  
-│   │   ├── trades_*.csv            # 交易记录
-│   │   └── pipeline_report_*.json  # 流程报告
-│   │
-│   ├── pipeline_shifted/ # 移动窗口流程输出
-│   ├── ols_rolling_*/    # OLS滚动窗口输出
-│   ├── e2e/              # 端到端测试输出
-│   ├── beta_analysis/    # Beta分析结果
-│   ├── kalman_analysis/  # Kalman滤波分析
-│   └── tests/            # 测试输出结果
+│   └── misc/             # 其他杂项输出
+│       └── *.csv                    # 未分类的CSV文件
 │
 ├── docs/                  # ✅ 文档 - 需求和架构文档
 │   ├── API.md            # API接口文档
@@ -176,11 +197,10 @@ Star-arb/                    # 项目根目录
 ├── test_reports/         # ✅ 测试报告
 │   └── data_management_test_*.json  # 数据管理测试报告
 │
-├── cointegration_results.csv        # ✅ 协整分析结果（根目录）
-├── signals_complete_pipeline_*.csv # ✅ 完整流程信号输出（根目录）
-├── backtest_trades_*.csv          # 回测交易记录（根目录）
-├── debug_*.csv                    # 调试输出文件（根目录）
-├── signals_test.csv               # 测试信号文件（根目录）
+├── backup/               # ❌ 备份文件（不入版本控制）
+│   ├── root_files/       # 从根目录备份的杂项文件
+│   ├── cleanup_*/        # 清理操作的备份
+│   └── README.md         # 备份说明
 │
 ├── CLAUDE.md                      # ✅ Claude AI项目指令
 ├── PROJECT_STRUCTURE.md           # ✅ 本文件 - 项目结构说明

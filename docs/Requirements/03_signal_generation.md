@@ -1,12 +1,13 @@
-# 模块3: 信号生成需求文档 V2.0
+# 模块3: 信号生成需求文档 V3.0
 
 ## 1. 模块概述
-接收协整配对模块的配对参数，使用**自适应双旋钮Kalman滤波**进行动态β更新，基于标准化创新(z-score)生成交易信号。核心设计：每个配对独立自适应，使用统一规则。
+接收协整配对模块的配对参数，使用**原始状态空间Kalman滤波器**进行动态β和α更新，基于标准化创新(z-score)生成交易信号。核心设计：使用二维状态空间模型[β, α]，严格的数学框架。
 
 **设计理念**：
-- 只用两个控制变量：测量噪声R_t（EWMA自适应）和折扣因子δ（控制模型灵活性）
-- 通过z方差带宽[0.8, 1.3]作为质量反馈信号自动调整参数
-- 每个配对独立维护自己的参数状态，根据自身特性自适应
+- 使用完整的二维状态空间模型：状态向量包含[β, α]
+- 固定的过程噪声协方差Q和自适应的测量噪声R
+- 基于创新的标准化z-score，不使用滚动窗口
+- 经过实证验证的最优参数：Q_beta=5e-6, Q_alpha=1e-5
 
 **职责边界**：
 - 协整配对模块负责：提供多个时间窗口的初始β值（1y, 2y, 3y, 5y等）
@@ -15,17 +16,18 @@
 
 ## 2. 用户故事 (User Stories)
 
-### Story 3.1: 自适应β估计
+### Story 3.1: 状态空间Kalman滤波
 **作为**研究员  
-**我希望**使用自适应Kalman滤波动态估计对冲比率  
-**以便**每个配对能根据自身特性找到合适的参数
+**我希望**使用原始状态空间Kalman滤波动态估计对冲比率和截距  
+**以便**通过严格的数学框架跟踪配对关系的演化
 
 **验收标准:**
-- OLS预热获得稳定初始参数
-- 每个配对独立维护R_t和δ参数
-- 通过z方差带宽自动校准
+- 使用60天OLS预热获得初始[β, α]和协方差
+- 二维状态向量：[β, α]'
+- 固定过程噪声：Q_beta=5e-6, Q_alpha=1e-5
+- 自适应测量噪声R（可选）
 - 支持批量处理多个配对
-- 记录完整β历史和参数调整日志
+- 记录完整的状态历史
 
 ### Story 3.2: 创新标准化
 **作为**研究员  
@@ -64,30 +66,25 @@
 
 ## 3. 功能需求 (Requirements)
 
-### REQ-3.1: 自适应Kalman滤波
+### REQ-3.1: 状态空间Kalman滤波
 | ID | 需求描述 | 优先级 |
 |---|---|---|
-| REQ-3.1.1 | 状态方程：β_t = β_{t-1} + w_t，使用折扣因子实现 | P0 |
-| REQ-3.1.2 | 观测方程：y_t = β_t * x_t + v_t | P0 |
-| REQ-3.1.3 | OLS预热：60日窗口估计初始β和残差方差 | P0 |
-| REQ-3.1.4 | R自适应：R_t = λ*R_{t-1} + (1-λ)*ε_t²，λ=0.96（日频） | P0 |
-| REQ-3.1.5 | 折扣实现：P^- = P/δ（只暴露δ，不配置Q） | P0 |
-| REQ-3.1.6 | 初始δ：全局δ_β=0.98，每个配对可独立调整 | P0 |
-| REQ-3.1.7 | 边界保护：β ∈ [-4, 4]，超出则限制 | P0 |
-| REQ-3.1.8 | 异常日处理：换月/公告日"只预测不更新" | P1 |
-| REQ-3.1.9 | 参数状态维护：每个配对独立维护δ、R、β、P | P0 |
-| REQ-3.1.10 | 预热期：60-120根K线，不交易但检查质量 | P0 |
+| REQ-3.1.1 | 状态方程：x_t = x_{t-1} + w_t，其中x=[β, α]' | P0 |
+| REQ-3.1.2 | 观测方程：y_t = β_t * x_t + α_t + v_t | P0 |
+| REQ-3.1.3 | OLS预热：60日窗口估计初始[β, α]和残差方差 | P0 |
+| REQ-3.1.4 | 过程噪声：Q = diag(5e-6, 1e-5) 固定值 | P0 |
+| REQ-3.1.5 | 测量噪声：R_init = 0.005，可选自适应 | P0 |
+| REQ-3.1.6 | 初始协方差：P_0 = I * 0.001 | P0 |
+| REQ-3.1.7 | 边界保护：无需限制，让数据说话 | P0 |
+| REQ-3.1.8 | 预热期：60天OLS + 60天Kalman warmup | P0 |
 
-### REQ-3.2: 参数自动校准
+### REQ-3.2: 信号质量监控
 | ID | 需求描述 | 优先级 |
 |---|---|---|
-| REQ-3.2.1 | 校准周期：每周或双周执行一次 | P0 |
-| REQ-3.2.2 | 校准窗口：最近60根K线 | P0 |
-| REQ-3.2.3 | z方差计算：v = Var(z_scores[-60:])，z为创新标准化 | P0 |
-| REQ-3.2.4 | δ调整规则：v>1.3则δ-=0.01，v<0.8则δ+=0.01 | P0 |
-| REQ-3.2.5 | δ边界：δ ∈ [0.95, 0.995] | P0 |
-| REQ-3.2.6 | 调整步长：固定0.01，温和调整 | P0 |
-| REQ-3.2.7 | 校准日志：记录每次校准的时间、原因、调整结果 | P0 |
+| REQ-3.2.1 | Z方差监控：期望值接近1.0 | P0 |
+| REQ-3.2.2 | 信号频率：Z>2比例在2-5%之间 | P0 |
+| REQ-3.2.3 | 均值回归率：>70%在20天内回归 | P0 |
+| REQ-3.2.4 | Beta稳定性：监控符号变化 | P0 |
 
 ### REQ-3.3: 信号生成逻辑
 | ID | 需求描述 | 优先级 |
@@ -119,21 +116,23 @@
 
 ## 4. 接口定义
 
-### 4.1 AdaptiveSignalGenerator类接口
+### 4.1 SignalGenerator类接口
 ```python
-class AdaptiveSignalGenerator:
+class SignalGenerator:
     def __init__(self, 
-                 # 交易阈值 - 全局统一
+                 # 交易阈值
                  z_open: float = 2.0, 
                  z_close: float = 0.5,
                  max_holding_days: int = 30,
                  
-                 # 校准参数
-                 calibration_freq: int = 5,  # 每5天校准一次
+                 # Kalman参数
+                 Q_beta: float = 5e-6,
+                 Q_alpha: float = 1e-5,
+                 R_init: float = 0.005,
+                 R_adapt: bool = True,
                  
-                 # OLS预热参数
-                 ols_window: int = 60,
-                 warm_up_days: int = 60)
+                 # 预热参数
+                 warmup: int = 60)
     
     # 单配对处理
     def process_pair(self, 
@@ -152,26 +151,24 @@ class AdaptiveSignalGenerator:
     def get_quality_report(self) -> pd.DataFrame
 ```
 
-### 4.2 AdaptiveKalmanFilter类接口
+### 4.2 OriginalKalmanFilter类接口
 ```python
-class AdaptiveKalmanFilter:
+class OriginalKalmanFilter:
     def __init__(self, 
-                 pair_name: str,
-                 delta: float = 0.98,      # 折扣因子初始值
-                 lambda_r: float = 0.96):   # R的EWMA参数
+                 warmup: int = 60,
+                 Q_beta: float = 5e-6,     # Beta过程噪声
+                 Q_alpha: float = 1e-5,    # Alpha过程噪声  
+                 R_init: float = 0.005,    # 初始测量噪声
+                 R_adapt: bool = True):    # 是否自适应R
     
-    # OLS预热
-    def warm_up_ols(self, x_data: np.ndarray, y_data: np.ndarray, 
-                     window: int = 60) -> dict
+    # 初始化
+    def initialize(self, x_data: np.ndarray, y_data: np.ndarray) -> None
     
     # 单步更新
-    def update(self, y_t: float, x_t: float) -> dict
+    def update(self, x_t: float, y_t: float) -> None
     
-    # 自动校准
-    def calibrate_delta(self) -> bool
-    
-    # 获取质量指标
-    def get_quality_metrics(self, window: int = 60) -> dict
+    # 获取当前状态
+    def get_state(self) -> dict
 ```
 
 ### 4.3 信号格式
@@ -287,111 +284,99 @@ def update_position_state(signal, position, days_held):
         return None, 0
 ```
 
-### 5.1 折扣Kalman滤波算法
+### 5.1 原始状态空间Kalman滤波算法
 ```python
-class AdaptiveKalmanFilter:
-    def __init__(self, pair_name, delta=0.98, lambda_r=0.96, 
-                 beta_bounds=(-4, 4)):
+class OriginalKalmanFilter:
+    def __init__(self, warmup=60, Q_beta=5e-6, Q_alpha=1e-5, 
+                 R_init=0.005, R_adapt=True):
         """
-        初始化自适应Kalman滤波器
+        初始化原始状态空间Kalman滤波器
         
         Args:
-            pair_name: 配对名称
-            delta: 折扣因子（默认0.98）
-            lambda_r: R的EWMA参数（默认0.96，日频）
-            beta_bounds: β边界限制
+            warmup: 预热期长度
+            Q_beta: Beta过程噪声
+            Q_alpha: Alpha过程噪声
+            R_init: 初始测量噪声
+            R_adapt: 是否自适应R
         """
-        self.pair_name = pair_name
-        self.delta = delta
-        self.lambda_r = lambda_r
-        self.beta_bounds = beta_bounds
+        self.warmup = warmup
+        self.Q = np.diag([Q_beta, Q_alpha])  # 过程噪声协方差
+        self.R = R_init                       # 测量噪声
+        self.R_adapt = R_adapt
         
-        # 状态变量（通过OLS预热初始化）
-        self.beta = None
-        self.P = None
-        self.R = None
+        # 状态变量 [beta, alpha]'
+        self.state = None
+        self.P = None  # 状态协方差
         
         # 历史记录
-        self.z_history = []
         self.beta_history = []
+        self.alpha_history = []
+        self.z_history = []
         
-    def warm_up_ols(self, x_data, y_data, window=60):
-        """OLS预热获得初始参数（使用去中心化数据）"""
-        # 去中心化处理（关键：避免截距问题导致R膨胀）
-        mu_x = np.mean(x_data[:window])
-        mu_y = np.mean(y_data[:window])
-        x_use = x_data[:window] - mu_x
-        y_use = y_data[:window] - mu_y
+    def initialize(self, x_data, y_data):
+        """使用60天OLS初始化状态"""
+        X = x_data[:self.warmup].reshape(-1, 1)
+        Y = y_data[:self.warmup]
         
-        # OLS回归估计初始β（基于去中心化数据）
-        reg = LinearRegression(fit_intercept=False)  # 不需要截距
-        reg.fit(x_use.reshape(-1, 1), y_use)
+        # OLS回归 y = β*x + α
+        from sklearn.linear_model import LinearRegression
+        model = LinearRegression()
+        model.fit(X, Y)
         
-        self.beta = reg.coef_[0]
-        innovations = y_use - reg.predict(x_use.reshape(-1, 1))
-        self.R = np.var(innovations, ddof=1)  # 初始R为创新方差
+        # 初始状态 [β, α]'
+        self.state = np.array([model.coef_[0], model.intercept_])
         
-        # P0初始化：使用Var(x)标定，不再乘0.1
-        x_var = np.var(x_use, ddof=1)
-        self.P = self.R / max(x_var, 1e-12)  # 让x²*P与R同量级
+        # 初始协方差
+        self.P = np.eye(2) * 0.001
         
-        # 保存均值用于后续去中心化
-        self.mu_x = mu_x
-        self.mu_y = mu_y
+        # 初始R基于残差方差
+        residuals = Y - model.predict(X)
+        self.R = np.var(residuals)
         
-        return {'beta': self.beta, 'R': self.R, 'P': self.P, 
-                'mu_x': mu_x, 'mu_y': mu_y}
-        
-    def update(self, y_t, x_t):
+    def update(self, x_t, y_t):
         """
-        折扣Kalman更新（核心算法）
-        
-        Returns:
-            dict: 包含β、标准化创新z等
+        状态空间Kalman更新
         """
-        # 1. 折扣先验协方差（等价于加入过程噪声）
-        P_prior = self.P / self.delta
+        # 1. 预测步
+        # 状态预测: x_t|t-1 = x_t-1|t-1
+        state_pred = self.state
         
-        # 2. 预测
-        beta_pred = self.beta  # 随机游走
-        y_pred = beta_pred * x_t
+        # 协方差预测: P_t|t-1 = P_t-1|t-1 + Q
+        P_pred = self.P + self.Q
+        
+        # 2. 观测预测
+        # H = [x_t, 1] 观测矩阵
+        H = np.array([x_t, 1.0])
+        
+        # 预测观测: y_pred = β*x + α
+        y_pred = H @ state_pred
         
         # 3. 创新
-        v = y_t - y_pred
-        S = x_t * P_prior * x_t + self.R
-        S = max(S, 1e-12)  # 数值稳定性
+        v = y_t - y_pred  # 创新
+        S = H @ P_pred @ H.T + self.R  # 创新方差
         
-        # 4. 创新标准化 z = v/√S（关键：不是滚动窗口标准化）
+        # 4. 标准化创新
         z = v / np.sqrt(S)
         
-        # 5. Kalman增益
-        K = P_prior * x_t / S
+        # 5. 更新步
+        # Kalman增益
+        K = P_pred @ H.T / S
         
-        # 6. 状态更新
-        beta_new = beta_pred + K * v
+        # 状态更新
+        self.state = state_pred + K * v
         
-        # 7. β边界保护
-        beta_new = np.clip(beta_new, self.beta_bounds[0], self.beta_bounds[1])
+        # 协方差更新
+        self.P = (np.eye(2) - np.outer(K, H)) @ P_pred
         
-        # 8. 后验协方差
-        self.P = (1 - K * x_t) * P_prior
+        # 6. 自适应R（可选）
+        if self.R_adapt:
+            lambda_r = 0.99  # EWMA参数
+            self.R = lambda_r * self.R + (1 - lambda_r) * v**2
         
-        # 9. R自适应（EWMA，λ=0.96）
-        self.R = self.lambda_r * self.R + (1 - self.lambda_r) * (v ** 2)
-        
-        # 10. 更新状态
-        self.beta = beta_new
+        # 7. 记录历史
+        self.beta_history.append(self.state[0])
+        self.alpha_history.append(self.state[1])
         self.z_history.append(z)
-        self.beta_history.append(self.beta)
-        
-        return {
-            'beta': self.beta,
-            'v': v,      # 创新 v = y - β*x
-            'S': S,      # 创新方差 S = x²*P + R
-            'z': z,      # 创新标准化 z = v/√S
-            'R': self.R,
-            'K': K
-        }
 ```
 
 ### 5.2 OLS基准计算
@@ -566,20 +551,21 @@ def generate_signal(z_score, position, days_held,
 
 ### 6.1 核心参数配置
 ```python
-# 全局参数（经验值）
+# 全局参数（经过实证验证的最优值）
 config = {
     # 交易阈值
     "z_open": 2.0,                  # 开仓阈值
     "z_close": 0.5,                 # 平仓阈值
     "max_holding_days": 30,         # 最大持仓天数
     
-    # 校准参数
-    "calibration_freq": 5,          # 每5天校准一次
-    "delta_step": 0.01,             # δ调整步长
+    # Kalman参数（固定值，实证最优）
+    "Q_beta": 5e-6,                 # Beta过程噪声
+    "Q_alpha": 1e-5,                # Alpha过程噪声
+    "R_init": 0.005,                # 初始测量噪声
+    "R_adapt": True,                # 自适应R
     
     # 预热参数
-    "ols_window": 60,               # OLS预热窗口
-    "warm_up_days": 60              # Kalman预热天数
+    "warmup": 60                    # OLS+Kalman预热天数
 }
 ```
 
@@ -608,22 +594,22 @@ initial_beta = pairs_df[f'beta_{beta_window}']
 
 ### 6.3 每个配对的状态
 ```python
-# 每个配对独立维护的参数
+# 每个配对独立维护的状态（使用统一参数）
 pair_states = {
     'AL-ZN': {
-        'delta': 0.98,      # 当前δ（会自适应调整）
-        'R': 0.001,         # 当前R（EWMA更新）
-        'beta': 1.23,       # 当前β
-        'P': 0.001,         # 当前P
-        'last_calibration': '2025-01-01',
-        'quality': 'good'   # good/warning/bad
+        'state': [1.23, 0.01],  # [β, α]
+        'P': [[0.001, 0], 
+              [0, 0.001]],      # 2x2协方差矩阵
+        'R': 0.005,             # 当前R（可自适应）
+        'z_var': 1.05,          # 最近60天Z方差
+        'quality': 'good'       # good/warning/bad
     },
     'CU-ZN': {
-        'delta': 0.97,      # CU-ZN可能需要更灵活
-        'R': 0.002,         # 噪声更大
-        'beta': 0.85,       
-        'P': 0.002,         
-        'last_calibration': '2025-01-01',
+        'state': [0.85, -0.02], # [β, α]
+        'P': [[0.001, 0],
+              [0, 0.001]],      # 2x2协方差矩阵
+        'R': 0.006,             # 当前R
+        'z_var': 0.98,          # 接近理想值1.0
         'quality': 'good'
     }
 }

@@ -28,6 +28,8 @@ class Position:
     lots_x: int
     lots_y: int
     direction: str  # 'long' or 'short'
+    action_x: str   # 'buy' or 'sell' - X腿的实际交易方向
+    action_y: str   # 'buy' or 'sell' - Y腿的实际交易方向
     open_date: datetime
     open_price_x: float
     open_price_y: float
@@ -147,18 +149,35 @@ class TradeExecutor:
         spec_x = self.contract_specs.get(symbol_x, {'multiplier': 1, 'tick_size': 1})
         spec_y = self.contract_specs.get(symbol_y, {'multiplier': 1, 'tick_size': 1})
         
-        # REQ-4.2.1.3: 计算开仓滑点
+        # REQ-4.2.1.3: 计算开仓滑点（考虑beta符号）
         price_x = prices['x']
         price_y = prices['y']
         
+        # 根据beta符号和信号方向确定实际交易方向
         if direction == 'long':
-            # 做多配对：买X卖Y
-            open_price_x = price_x + self.slippage_ticks * spec_x['tick_size']  # 买入加滑点
-            open_price_y = price_y - self.slippage_ticks * spec_y['tick_size']  # 卖出减滑点
+            # 做多配对（残差偏低，预期上升）
+            if beta > 0:
+                # 正beta：Y和X正相关，买Y卖X
+                action_x, action_y = 'sell', 'buy'
+                open_price_x = price_x - self.slippage_ticks * spec_x['tick_size']  # 卖X减滑点
+                open_price_y = price_y + self.slippage_ticks * spec_y['tick_size']  # 买Y加滑点
+            else:
+                # 负beta：Y和X负相关，同时买Y买X
+                action_x, action_y = 'buy', 'buy'
+                open_price_x = price_x + self.slippage_ticks * spec_x['tick_size']  # 买X加滑点
+                open_price_y = price_y + self.slippage_ticks * spec_y['tick_size']  # 买Y加滑点
         else:
-            # 做空配对：卖X买Y
-            open_price_x = price_x - self.slippage_ticks * spec_x['tick_size']  # 卖出减滑点
-            open_price_y = price_y + self.slippage_ticks * spec_y['tick_size']  # 买入加滑点
+            # 做空配对（残差偏高，预期下降）
+            if beta > 0:
+                # 正beta：Y和X正相关，卖Y买X
+                action_x, action_y = 'buy', 'sell'
+                open_price_x = price_x + self.slippage_ticks * spec_x['tick_size']  # 买X加滑点
+                open_price_y = price_y - self.slippage_ticks * spec_y['tick_size']  # 卖Y减滑点
+            else:
+                # 负beta：Y和X负相关，同时卖Y卖X
+                action_x, action_y = 'sell', 'sell'
+                open_price_x = price_x - self.slippage_ticks * spec_x['tick_size']  # 卖X减滑点
+                open_price_y = price_y - self.slippage_ticks * spec_y['tick_size']  # 卖Y减滑点
         
         # REQ-4.2.1.4: 计算开仓手续费
         value_x = lots_x * price_x * spec_x['multiplier']
@@ -178,6 +197,8 @@ class TradeExecutor:
             lots_x=lots_x,
             lots_y=lots_y,
             direction=direction,
+            action_x=action_x,
+            action_y=action_y,
             open_date=open_date,
             open_price_x=open_price_x,
             open_price_y=open_price_y,
@@ -215,18 +236,32 @@ class TradeExecutor:
         spec_x = self.contract_specs.get(position.symbol_x, {'multiplier': 1, 'tick_size': 1})
         spec_y = self.contract_specs.get(position.symbol_y, {'multiplier': 1, 'tick_size': 1})
         
-        # REQ-4.2.2.2: 计算平仓滑点（方向相反）
+        # REQ-4.2.2.2: 计算平仓滑点（考虑beta符号，方向相反）
         price_x = prices['x']
         price_y = prices['y']
+        beta = position.beta
         
+        # 平仓方向与开仓相反
         if position.direction == 'long':
-            # 平多：卖X买Y
-            close_price_x = price_x - self.slippage_ticks * spec_x['tick_size']  # 卖出减滑点
-            close_price_y = price_y + self.slippage_ticks * spec_y['tick_size']  # 买入加滑点
+            # 平多
+            if beta > 0:
+                # 正beta开仓时：买Y卖X，平仓时：卖Y买X
+                close_price_x = price_x + self.slippage_ticks * spec_x['tick_size']  # 买X加滑点
+                close_price_y = price_y - self.slippage_ticks * spec_y['tick_size']  # 卖Y减滑点
+            else:
+                # 负beta开仓时：买Y买X，平仓时：卖Y卖X
+                close_price_x = price_x - self.slippage_ticks * spec_x['tick_size']  # 卖X减滑点
+                close_price_y = price_y - self.slippage_ticks * spec_y['tick_size']  # 卖Y减滑点
         else:
-            # 平空：买X卖Y
-            close_price_x = price_x + self.slippage_ticks * spec_x['tick_size']  # 买入加滑点
-            close_price_y = price_y - self.slippage_ticks * spec_y['tick_size']  # 卖出减滑点
+            # 平空
+            if beta > 0:
+                # 正beta开仓时：卖Y买X，平仓时：买Y卖X
+                close_price_x = price_x - self.slippage_ticks * spec_x['tick_size']  # 卖X减滑点
+                close_price_y = price_y + self.slippage_ticks * spec_y['tick_size']  # 买Y加滑点
+            else:
+                # 负beta开仓时：卖Y卖X，平仓时：买Y买X
+                close_price_x = price_x + self.slippage_ticks * spec_x['tick_size']  # 买X加滑点
+                close_price_y = price_y + self.slippage_ticks * spec_y['tick_size']  # 买Y加滑点
         
         # REQ-4.2.2.3: 计算平仓手续费
         close_value_x = position.lots_x * price_x * spec_x['multiplier']
@@ -234,15 +269,27 @@ class TradeExecutor:
         close_total_value = close_value_x + close_value_y
         close_commission = close_total_value * self.commission_rate
         
-        # REQ-4.2.2.4: 计算实现盈亏
+        # REQ-4.2.2.4: 计算实现盈亏（考虑beta符号）
         if position.direction == 'long':
             # 做多盈亏
-            pnl_x = (close_price_x - position.open_price_x) * position.lots_x * spec_x['multiplier']
-            pnl_y = (position.open_price_y - close_price_y) * position.lots_y * spec_y['multiplier']
+            if beta > 0:
+                # 正beta：开仓买Y卖X，平仓卖Y买X
+                pnl_x = (position.open_price_x - close_price_x) * position.lots_x * spec_x['multiplier']  # 卖X开仓，买X平仓
+                pnl_y = (close_price_y - position.open_price_y) * position.lots_y * spec_y['multiplier']  # 买Y开仓，卖Y平仓
+            else:
+                # 负beta：开仓买Y买X，平仓卖Y卖X
+                pnl_x = (close_price_x - position.open_price_x) * position.lots_x * spec_x['multiplier']  # 买X开仓，卖X平仓
+                pnl_y = (close_price_y - position.open_price_y) * position.lots_y * spec_y['multiplier']  # 买Y开仓，卖Y平仓
         else:
             # 做空盈亏
-            pnl_x = (position.open_price_x - close_price_x) * position.lots_x * spec_x['multiplier']
-            pnl_y = (close_price_y - position.open_price_y) * position.lots_y * spec_y['multiplier']
+            if beta > 0:
+                # 正beta：开仓卖Y买X，平仓买Y卖X
+                pnl_x = (close_price_x - position.open_price_x) * position.lots_x * spec_x['multiplier']  # 买X开仓，卖X平仓
+                pnl_y = (position.open_price_y - close_price_y) * position.lots_y * spec_y['multiplier']  # 卖Y开仓，买Y平仓
+            else:
+                # 负beta：开仓卖Y卖X，平仓买Y买X
+                pnl_x = (position.open_price_x - close_price_x) * position.lots_x * spec_x['multiplier']  # 卖X开仓，买X平仓
+                pnl_y = (position.open_price_y - close_price_y) * position.lots_y * spec_y['multiplier']  # 卖Y开仓，买Y平仓
         
         gross_pnl = pnl_x + pnl_y
         total_commission = position.open_commission + close_commission

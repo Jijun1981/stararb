@@ -82,3 +82,17 @@ docs/.doctrees/
 *.db
 *.sqlite
 *.sqlite3
+# 输出和结果文件
+*.png
+*.jpg
+*.jpeg
+
+# 缓存和临时文件
+*.pyc
+*.pyo
+
+# 数据文件
+data/*.parquet
+
+# 备份文件
+backup/cleanup_*
