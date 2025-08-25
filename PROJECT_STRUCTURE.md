@@ -1,7 +1,7 @@
 # 项目结构规范
 
 ## 更新日期
-2025-08-25 (项目结构已重新整理和清理)
+2025-08-25 (项目结构已重新整理，根目录文件已全部归位)
 
 ## 目录结构详细说明
 
@@ -205,7 +205,26 @@ Star-arb/                    # 项目根目录
 ├── CLAUDE.md                      # ✅ Claude AI项目指令
 ├── PROJECT_STRUCTURE.md           # ✅ 本文件 - 项目结构说明
 └── requirements.txt               # Python依赖管理（如有）
+
+【重要】根目录只存放项目配置文件和文档，不应存放任何处理结果文件！
 ```
+
+## ⚠️ 根目录文件管理规范
+
+### 绝对禁止在根目录存放
+- ❌ CSV数据文件（→ `output/`相应子目录）
+- ❌ 交易记录文件（→ `output/backtest/`）
+- ❌ 信号文件（→ `output/signals/`）
+- ❌ 质量报告（→ `output/quality_reports/`）
+- ❌ 日志文件（→ `logs/` 或 `output/misc/`）
+- ❌ 临时脚本（→ `scripts/`相应子目录）
+- ❌ 图表文件（→ `output/plots/`）
+
+### 根目录只允许存放
+- ✅ 项目配置文件（CLAUDE.md、PROJECT_STRUCTURE.md）
+- ✅ Python依赖文件（requirements.txt、setup.py）
+- ✅ Git配置文件（.gitignore、.gitattributes）
+- ✅ README.md（项目说明）
 
 ## 📁 文件放置指南
 
@@ -332,8 +351,10 @@ pytest tests/unit/test_signal_state_machine.py -v
 | 需求文档 | `docs/Requrements/` | `03_signal_generation.md` |
 | 测试状态机 | `tests/unit/` | `test_signal_state_machine.py` |
 | 输出结果查看 | `output/pipeline_v21/` | `signals_*.csv`, `trades_*.csv` |
-| 协整结果 | 根目录 | `cointegration_results.csv` |
-| 最新信号文件 | 根目录 | `signals_complete_pipeline_*.csv` |
+| 协整结果 | `output/cointegration/` | `cointegration_results.csv` |
+| 最新信号文件 | `output/signals/` | `signals_complete_pipeline_*.csv` |
+| 回测交易记录 | `output/backtest/` | `backtest_trades_*.csv` |
+| 质量报告 | `output/quality_reports/` | `quality_report_*.csv` |
 
 ### 版本控制原则
 
@@ -344,11 +365,11 @@ pytest tests/unit/test_signal_state_machine.py -v
 - Notebooks（`notebooks/`）
 
 **❌ 不应该提交到Git：**
-- 大数据文件（`data/`中的CSV）
-- 输出结果（`output/`）
+- 大数据文件（`data/`中的CSV、Parquet文件）
+- 输出结果（`output/`目录下所有文件）
 - 日志文件（`logs/`）
 - 缓存文件（`__pycache__/`, `*.pyc`）
-- 根目录下的结果CSV文件
+- 任何在根目录下的CSV、PNG、LOG文件（应该放在output/）
 
 ## 📝 开发最佳实践
 
@@ -414,6 +435,14 @@ cp signals_complete_pipeline_latest.csv backup/
 ```
 
 ### 常见问题排查
+
+**Q: 运行脚本后生成的文件应该在哪里？**
+A: 所有输出都应该在`output/`目录下：
+- 回测结果 → `output/backtest/`
+- 信号文件 → `output/signals/`
+- 分析报告 → `output/analysis/`
+- 图表 → `output/plots/`
+- 其他 → `output/misc/`
 
 **Q: 找不到某个功能在哪里实现？**
 A: 查看上面的"文件寻找指南"表格，根据功能类型找到对应位置

@@ -71,8 +71,11 @@ sys.path.insert(0, str(project_root))
 # 导入最新的原子服务
 from lib.data import load_data  # 使用统一的data-joint数据源
 from lib.coint import CointegrationAnalyzer
-from lib.signal_generation import SignalGenerator, calculate_ols_beta
-from lib.backtest import BacktestEngine, PositionManager
+from lib.signal_generation import SignalGeneratorV3
+from lib.backtest.engine import BacktestEngine
+from lib.backtest.position_sizing import PositionSizingConfig
+from lib.backtest.trade_executor import ExecutionConfig
+from lib.backtest.risk_manager import RiskConfig
 
 # 配置日志
 logging.basicConfig(
