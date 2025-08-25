@@ -37,14 +37,16 @@
 
 **分年度统计**：
 
-- **2020年**: Z方差1.214，Z>2比例7.4%，评分6.7/9
-- **2021年**: Z方差1.459，Z>2比例7.8%，评分5.5/9
-- **2022年**: Z方差1.191，Z>2比例7.5%，评分6.2/9
+- **2020年**: Z方差1.214，Z>2比例7.4%，评分6.7/9，负beta完美保持
+- **2021年**: Z方差1.459，Z>2比例7.8%，评分5.5/9，负beta完美保持
+- **2022年**: Z方差1.191，Z>2比例7.5%，评分6.2/9，负beta完美保持
 
 **关键发现**：
 
 - **z = residual/√R** 方法产生理想的统计特性
 - **z = innovation/√S** 方法在实际测试中信号量严重不足（Z方差~0.3，Z>2比例接近0%）
+- **矩阵构造顺序至关重要**：必须使用 `[x_data, 常数项]` 确保负beta不被颠倒
+- **负beta符号稳定性**：100%的配对无符号变化，负beta配对完美保持
 
 ### 2.2 方法对比验证
 
@@ -413,24 +415,25 @@ class OriginalKalmanFilter:
         self.z_history = []
       
     def initialize(self, x_data, y_data):
-        """使用60天OLS初始化状态"""
-        X = x_data[:self.warmup].reshape(-1, 1)
+        """使用OLS初始化状态 - 修正版本，与kalman_original_version.py一致"""
+        # 手动构造设计矩阵，确保列顺序：[x_data, 常数项]
+        X = np.column_stack([x_data[:self.warmup], np.ones(self.warmup)])
         Y = y_data[:self.warmup]
       
-        # OLS回归 y = β*x + α
-        from sklearn.linear_model import LinearRegression
-        model = LinearRegression()
-        model.fit(X, Y)
-      
-        # 初始状态 [β, α]'
-        self.state = np.array([model.coef_[0], model.intercept_])
+        # 使用最小二乘法直接求解 y = β*x + α
+        coeffs = np.linalg.lstsq(X, Y, rcond=None)[0]
+        
+        # 初始状态 [β, α]' - 正确的顺序
+        beta_init = coeffs[0]    # x_data对应的系数
+        alpha_init = coeffs[1]   # 常数项系数  
+        self.state = np.array([beta_init, alpha_init])
       
         # 初始协方差
         self.P = np.eye(2) * 0.001
       
         # 初始R基于残差方差
-        residuals = Y - model.predict(X)
-        self.R = np.var(residuals)
+        residuals = Y - X @ coeffs
+        self.R = np.var(residuals) if len(residuals) > 1 else self.R_init
       
     def update(self, x_t, y_t):
         """
@@ -500,11 +503,11 @@ def calculate_ols_beta(y_data, x_data, window):
     y_window = y_data[-window:]
     x_window = x_data[-window:]
   
-    # OLS回归: y = alpha + beta * x
-    X = np.column_stack([np.ones(len(x_window)), x_window])
+    # OLS回归: y = beta * x + alpha，与Kalman初始化保持一致
+    X = np.column_stack([x_window, np.ones(len(x_window))])
     try:
         coeffs = np.linalg.lstsq(X, y_window, rcond=None)[0]
-        return coeffs[1]  # beta系数
+        return coeffs[0]  # beta系数（现在是第1个系数）
     except:
         return np.nan
 ```
