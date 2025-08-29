@@ -97,7 +97,7 @@ class BacktestEngine:
             day_prices = self._get_day_prices(prices, date)
             
             # 处理当天
-            self.process_date(date, day_signals, day_prices, contract_specs)
+            self.process_date(date, day_signals, day_prices, contract_specs, prices)
             
             # 更新权益曲线
             self._update_equity(date, day_prices, contract_specs)
@@ -113,7 +113,8 @@ class BacktestEngine:
         date: datetime,
         day_signals: pd.DataFrame,
         prices: Dict[str, float],
-        contract_specs: Dict
+        contract_specs: Dict,
+        price_data: pd.DataFrame = None
     ):
         """
         处理单个交易日
@@ -123,9 +124,16 @@ class BacktestEngine:
             day_signals: 当天信号
             prices: 当天价格
             contract_specs: 合约规格
+            price_data: 完整价格数据（用于计算交易日数量）
         """
+        # 确保date是datetime类型
+        if hasattr(date, 'to_pydatetime'):
+            date = date.to_pydatetime()
+        elif isinstance(date, pd.Timestamp):
+            date = date.to_pydatetime()
+            
         # 1. 风险检查（止损、时间止损）
-        self._check_positions_risk(date, prices, contract_specs)
+        self._check_positions_risk(date, prices, contract_specs, price_data)
         
         # 2. 处理信号
         for _, signal in day_signals.iterrows():
@@ -135,7 +143,8 @@ class BacktestEngine:
         self,
         date: datetime,
         prices: Dict[str, float],
-        contract_specs: Dict
+        contract_specs: Dict,
+        price_data: pd.DataFrame = None
     ):
         """
         检查所有持仓的风险
@@ -144,6 +153,7 @@ class BacktestEngine:
             date: 当前日期
             prices: 当前价格
             contract_specs: 合约规格
+            price_data: 完整价格数据（用于计算交易日数量）
         """
         positions_to_close = []
         
@@ -172,8 +182,13 @@ class BacktestEngine:
                 self.risk_manager.record_stop_loss(position, current_pnl)
                 continue
             
-            # 检查时间止损
-            should_stop, time_reason = self.risk_manager.check_time_stop(position, date)
+            # 检查时间止损 - 确保date是datetime类型
+            check_date = date
+            if hasattr(date, 'to_pydatetime'):
+                check_date = date.to_pydatetime()
+            elif isinstance(date, pd.Timestamp):
+                check_date = date.to_pydatetime()
+            should_stop, time_reason = self.risk_manager.check_time_stop(position, check_date, price_data)
             
             if should_stop:
                 positions_to_close.append((position_id, 'time_stop'))
@@ -200,7 +215,7 @@ class BacktestEngine:
             date: 当前日期
         """
         pair = signal['pair']
-        trade_signal = signal.get('trade_signal', None)
+        trade_signal = signal.get('signal', None)  # 修正字段名
         
         if trade_signal is None:
             return
@@ -214,6 +229,13 @@ class BacktestEngine:
         
         # 开仓信号
         elif trade_signal in ['open_long', 'open_short'] and not existing_position:
+            # Beta过滤检查
+            if self.config.risk_config.beta_filter_enabled:
+                beta = abs(signal.get('beta', 1.0))
+                if beta < self.config.risk_config.beta_min or beta > self.config.risk_config.beta_max:
+                    # Beta不在合理范围内，跳过该信号
+                    return
+            
             # 检查持仓数量限制
             if not self.risk_manager.check_position_limit(self.positions):
                 return
@@ -300,12 +322,13 @@ class BacktestEngine:
                 'y': position_result['final_lots_y']
             },
             prices={'x': price_x, 'y': price_y},
-            signal_type=signal['trade_signal'],
+            signal_type=signal['signal'],  # 修正字段名
             open_date=date
         )
         
-        # 记录持仓
+        # 记录持仓和信号信息
         position.allocated_capital = position_result['allocated_capital']
+        position.open_z_score = signal.get('z_score', 0.0)  # 保存开仓z_score
         self.positions[position.position_id] = position
         
         # 更新可用资金
@@ -434,11 +457,19 @@ class BacktestEngine:
             价格字典
         """
         if isinstance(prices, pd.DataFrame):
-            if date in prices.index:
-                return prices.loc[date].to_dict()
+            # 转换date为pandas Timestamp用于索引比较
+            if hasattr(date, 'to_pydatetime'):
+                check_date = date
+            elif isinstance(date, datetime):
+                check_date = pd.Timestamp(date)
+            else:
+                check_date = date
+                
+            if check_date in prices.index:
+                return prices.loc[check_date].to_dict()
             else:
                 # 使用最近的价格
-                closest_date = prices.index[prices.index <= date][-1] if any(prices.index <= date) else prices.index[0]
+                closest_date = prices.index[prices.index <= check_date][-1] if any(prices.index <= check_date) else prices.index[0]
                 return prices.loc[closest_date].to_dict()
         return {}
     

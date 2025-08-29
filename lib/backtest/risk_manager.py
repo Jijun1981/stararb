@@ -17,6 +17,9 @@ class RiskConfig:
     max_holding_days: int = 30       # 最大持仓天数
     max_positions: int = 20          # 最大同时持仓数
     margin_buffer: float = 0.8       # 保证金缓冲率
+    beta_filter_enabled: bool = False  # 是否启用beta过滤
+    beta_min: float = 0.3            # beta绝对值最小阈值
+    beta_max: float = 3.0            # beta绝对值最大阈值
 
 
 @dataclass
@@ -203,25 +206,39 @@ class RiskManager:
     def calculate_holding_days(
         self,
         position: Any,
-        current_date: datetime
+        current_date: datetime,
+        price_data: Any = None
     ) -> int:
         """
-        REQ-4.3.2.1: 计算持仓天数
+        REQ-4.3.2.1: 计算持仓天数（基于观测点数量，即交易日）
         
         Args:
             position: 持仓对象
             current_date: 当前日期
+            price_data: 价格数据（用于计算交易日数量）
             
         Returns:
-            持仓天数
+            持仓天数（交易日数量）
         """
+        # 如果有价格数据，使用观测点数量计算交易日
+        if price_data is not None:
+            try:
+                # 获取开仓日期到当前日期之间的交易日数量
+                date_range = price_data.loc[position.open_date:current_date].index
+                return len(date_range) - 1  # 减1是因为开仓当天不算持仓天数
+            except (KeyError, AttributeError):
+                # 如果价格数据不可用，回退到自然日计算
+                pass
+        
+        # 回退方案：使用自然日
         delta = current_date - position.open_date
         return delta.days
     
     def check_time_stop(
         self,
         position: Any,
-        current_date: datetime
+        current_date: datetime,
+        price_data: Any = None
     ) -> Tuple[bool, str]:
         """
         REQ-4.3.2.2: 检查时间止损
@@ -229,16 +246,17 @@ class RiskManager:
         Args:
             position: 持仓对象
             current_date: 当前日期
+            price_data: 价格数据（用于计算交易日数量）
             
         Returns:
             (是否触发时间止损, 原因描述)
         """
-        holding_days = self.calculate_holding_days(position, current_date)
+        holding_days = self.calculate_holding_days(position, current_date, price_data)
         
         # REQ-4.3.2.2: 触发条件 days >= max_holding_days
         if holding_days >= self.max_holding_days:
             # REQ-4.3.2.3: 记录时间止损原因
-            reason = f"Time stop triggered: held for {holding_days} days (max: {self.max_holding_days} days)"
+            reason = f"Time stop triggered: held for {holding_days} trading days (max: {self.max_holding_days} trading days)"
             return True, reason
         
         return False, ""
@@ -359,6 +377,8 @@ class RiskManager:
         Returns:
             是否可以添加新持仓
         """
+        if self.max_positions is None:
+            return True  # 无限制
         return len(positions) < self.max_positions
     
     # ========== 综合风险管理 ==========
@@ -369,7 +389,8 @@ class RiskManager:
         current_date: datetime,
         current_prices: Dict[str, float],
         current_pnl: float,
-        allocated_capital: float
+        allocated_capital: float,
+        price_data: Any = None
     ) -> Dict[str, Any]:
         """
         综合风险检查
@@ -380,6 +401,7 @@ class RiskManager:
             current_prices: 当前价格
             current_pnl: 当前盈亏
             allocated_capital: 分配的资金
+            price_data: 价格数据（用于计算交易日数量）
             
         Returns:
             综合风险状态
@@ -391,12 +413,12 @@ class RiskManager:
         
         # 检查时间止损
         time_stop_triggered, time_stop_reason = self.check_time_stop(
-            position, current_date
+            position, current_date, price_data
         )
         
         # 计算风险指标
         pnl_pct = self.calculate_pnl_percentage(current_pnl, allocated_capital)
-        holding_days = self.calculate_holding_days(position, current_date)
+        holding_days = self.calculate_holding_days(position, current_date, price_data)
         
         # 确定是否需要平仓
         should_close = stop_loss_triggered or time_stop_triggered
